@@ -251,6 +251,11 @@ def _excel_result_code_to_text(value: Any) -> str | None:
     return RESULT_CODE_TO_TEXT.get(code)
 
 
+def _should_skip_due_to_result(result_text: str | None) -> bool:
+    # When the excel indicates 'buiten gebruik', we should ignore the record.
+    return (result_text or "").strip().lower() == "niet van toepassing (buiten gebruik)"
+
+
 def _find_eigenschap_by_name(eigenschappen, name: str) -> Any | None:
     """Find an EigenschapValueDTO by eigenschap.naam (case-insensitive)."""
     wanted = name.strip().lower()
@@ -329,7 +334,7 @@ def _build_update_dto_by_eigenschap_uuid(eigenschap_uuid: str, typed_value: dict
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description=(
-            "From an enriched Vincotte Excel, pick 1 candidate row and prepare updates for 'datum laatste keuring' and "
+            "From an enriched Vincotte Excel, process candidate rows and prepare/apply updates for 'datum laatste keuring' and "
             "'resultaat keuring' via EMInfra API (default DRY-RUN)."
         )
     )
@@ -368,6 +373,12 @@ def _build_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help="Arango UUID to update. If provided, finds the first row matching this UUID.",
+    )
+    p.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Max number of candidate rows to process (default: no limit).",
     )
 
     p.add_argument(
@@ -411,6 +422,93 @@ def _diagnose_eigenschappen(eminfra: EMInfraClient, asset_uuid: str) -> None:
         logger.exception("Diagnostics failed while listing kenmerken for asset %s", asset_uuid)
 
 
+def _apply_updates_for_asset(
+    *,
+    eminfra: EMInfraClient,
+    asset_uuid: str,
+    new_visit_date: date,
+    new_result_text: str,
+    apply: bool,
+) -> bool:
+    """Prepare (and optionally apply) the two updates for one asset.
+
+    Returns True if we attempted to apply (or would apply in dry-run), False if skipped.
+    """
+
+    eigs = fetch_all_eigenschappen(eminfra, asset_uuid)
+    logger.info("Fetched %d eigenschapwaarden", len(eigs))
+
+    if not eigs:
+        _diagnose_eigenschappen(eminfra, asset_uuid)
+        logger.warning(
+            "No existing eigenschapwaarden found; will build update DTOs using fixed LSDeel Eigenschap UUIDs."
+        )
+
+        date_typed_value = {"_type": "date", "value": new_visit_date.isoformat()}
+        result_typed_value = {"_type": "text", "value": new_result_text}
+
+        date_update = _build_update_dto_by_eigenschap_uuid(LSDEEL_EIGENSCHAP_DATUM_UUID, date_typed_value)
+        result_update = _build_update_dto_by_eigenschap_uuid(LSDEEL_EIGENSCHAP_RESULTAAT_UUID, result_typed_value)
+
+        logger.info(
+            "Prepared update (no existing values): datum laatste keuring uuid=%s -> %s",
+            LSDEEL_EIGENSCHAP_DATUM_UUID,
+            date_typed_value,
+        )
+        logger.info(
+            "Prepared update (no existing values): resultaat keuring uuid=%s -> %s",
+            LSDEEL_EIGENSCHAP_RESULTAAT_UUID,
+            result_typed_value,
+        )
+
+        if not apply:
+            return True
+
+        eminfra.eigenschap_service.update_eigenschap_by_uuid(asset_uuid, date_update)
+        eminfra.eigenschap_service.update_eigenschap_by_uuid(asset_uuid, result_update)
+        return True
+
+    ev_date = _find_eigenschap_by_name(eigs, "datum laatste keuring")
+    ev_result = _find_eigenschap_by_name(eigs, "resultaat keuring")
+
+    if ev_date is None or ev_result is None:
+        logger.error(
+            "Missing required eigenschap on asset %s | datum laatste keuring found=%s | resultaat keuring found=%s",
+            asset_uuid,
+            ev_date is not None,
+            ev_result is not None,
+        )
+        return False
+
+    logger.info(
+        "Target eigenschap UUIDs | datum laatste keuring=%s | resultaat keuring=%s",
+        getattr(ev_date.eigenschap, "uuid", None),
+        getattr(ev_result.eigenschap, "uuid", None),
+    )
+
+    try:
+        logger.info("Current typedValue (datum laatste keuring): %s", getattr(ev_date, "typedValue", None))
+        logger.info("Current typedValue (resultaat keuring): %s", getattr(ev_result, "typedValue", None))
+    except Exception:
+        pass
+
+    date_typed_value = {"_type": "date", "value": new_visit_date.isoformat()}
+    result_typed_value = {"_type": "text", "value": new_result_text}
+
+    date_update = _build_update_dto(ev_date, date_typed_value)
+    result_update = _build_update_dto(ev_result, result_typed_value)
+
+    logger.info("Prepared update: datum laatste keuring -> %s", date_typed_value)
+    logger.info("Prepared update: resultaat keuring -> %s", result_typed_value)
+
+    if not apply:
+        return True
+
+    eminfra.eigenschap_service.update_eigenschap_by_uuid(asset_uuid, date_update)
+    eminfra.eigenschap_service.update_eigenschap_by_uuid(asset_uuid, result_update)
+    return True
+
+
 def main() -> int:
     logging.basicConfig(
         format="%(asctime)s %(levelname)-8s %(message)s",
@@ -439,155 +537,113 @@ def main() -> int:
         )
         return 2
 
-    # Load workbook once (needed for selecting a specific row)
+    # Load workbook once (needed for selecting rows and reading values)
     wb = load_workbook(excel_path, data_only=True)
     ws = wb.active
 
-    # Determine which row to process.
-    selected_row: int | None = None
+    # Determine actual visit_date col (some exports use F instead of G)
+    visit_date_col = _find_visit_date_col(ws)
 
-    if args.row:
-        selected_row = int(args.row)
-    elif args.asset_uuid:
-        uuid_col = _find_col_by_header(ws, "Arango UUID")
-        if uuid_col is None:
-            logger.error("Could not find 'Arango UUID' header in %s", excel_path.name)
-            return 2
-        wanted = str(args.asset_uuid).strip()
-        for r in range(2, ws.max_row + 1):
-            v = ws.cell(row=r, column=uuid_col).value
-            if v is not None and str(v).strip() == wanted:
-                selected_row = r
-                break
-        if selected_row is None:
-            logger.error("No row found with Arango UUID=%s", wanted)
-            return 2
-    else:
-        # Fall back to candidates list.
-        candidates = iter_candidates_from_excel(excel_path, debug=bool(args.debug_cols))
-        logger.info("Found %d candidate row(s) in %s", len(candidates), excel_path.name)
-        if not candidates:
-            return 0
-        selected_row = candidates[0].row_index
-
-    # Resolve asset_uuid for selected_row
     uuid_col = _find_col_by_header(ws, "Arango UUID")
     if uuid_col is None:
         logger.error("Could not find 'Arango UUID' header in %s", excel_path.name)
         return 2
 
-    asset_uuid_raw = ws.cell(row=selected_row, column=uuid_col).value
-    if asset_uuid_raw is None or str(asset_uuid_raw).strip() == "":
-        logger.error("Selected row %d has no Arango UUID", selected_row)
-        return 2
+    rows_to_process: list[int] = []
 
-    asset_uuid = str(asset_uuid_raw).strip()
+    if args.row:
+        rows_to_process = [int(args.row)]
+    elif args.asset_uuid:
+        wanted = str(args.asset_uuid).strip()
+        for r in range(2, ws.max_row + 1):
+            v = ws.cell(row=r, column=uuid_col).value
+            if v is not None and str(v).strip() == wanted:
+                rows_to_process = [r]
+                break
+        if not rows_to_process:
+            logger.error("No row found with Arango UUID=%s", wanted)
+            return 2
+    else:
+        candidates = iter_candidates_from_excel(excel_path, debug=bool(args.debug_cols))
+        logger.info("Found %d candidate row(s) in %s", len(candidates), excel_path.name)
+        rows_to_process = [c.row_index for c in candidates]
 
-    # Determine actual visit_date col (some exports use F instead of G)
-    visit_date_col = _find_visit_date_col(ws)
+    if args.limit is not None:
+        rows_to_process = rows_to_process[: max(0, int(args.limit))]
 
-    # Read relevant Excel cells: column B (result code) and visit_date col
-    result_code_raw = ws.cell(row=selected_row, column=2).value  # column B
-    visit_date_raw = ws.cell(row=selected_row, column=visit_date_col).value
-
-    new_visit_date = _parse_date(visit_date_raw)
-    new_result_text = _excel_result_code_to_text(result_code_raw)
-
-    logger.info(
-        "Selected row %d | Arango UUID=%s | Excel visit_date(col %d raw)=%r -> %s | Excel result(raw)=%r -> %r",
-        selected_row,
-        asset_uuid,
-        visit_date_col,
-        visit_date_raw,
-        new_visit_date,
-        result_code_raw,
-        new_result_text,
-    )
-
-    if new_visit_date is None:
-        logger.error("Could not parse visit_date from column %d for row %d", visit_date_col, selected_row)
-        return 2
-
-    if new_result_text is None:
-        logger.error("Could not map result code from column B for row %d", selected_row)
-        return 2
+    if not rows_to_process:
+        logger.info("Nothing to do.")
+        return 0
 
     eminfra = EMInfraClient(env=env_map[args.env], auth_type=AuthType.JWT, settings_path=args.settings)
 
-    eigs = fetch_all_eigenschappen(eminfra, asset_uuid)
-    logger.info("Fetched %d eigenschapwaarden", len(eigs))
+    attempted = applied = skipped = 0
 
-    if not eigs:
-        _diagnose_eigenschappen(eminfra, asset_uuid)
-        logger.warning(
-            "No existing eigenschapwaarden found; will build update DTOs using fixed LSDeel Eigenschap UUIDs."
+    for row in rows_to_process:
+        asset_uuid_raw = ws.cell(row=row, column=uuid_col).value
+        if asset_uuid_raw is None or str(asset_uuid_raw).strip() == "":
+            skipped += 1
+            logger.warning("Skipping row %d: missing Arango UUID", row)
+            continue
+        asset_uuid = str(asset_uuid_raw).strip()
+
+        result_code_raw = ws.cell(row=row, column=2).value  # column B
+        visit_date_raw = ws.cell(row=row, column=visit_date_col).value
+
+        new_visit_date = _parse_date(visit_date_raw)
+        new_result_text = _excel_result_code_to_text(result_code_raw)
+
+        logger.info(
+            "Row %d | Arango UUID=%s | Excel visit_date(col %d raw)=%r -> %s | Excel result(raw)=%r -> %r",
+            row,
+            asset_uuid,
+            visit_date_col,
+            visit_date_raw,
+            new_visit_date,
+            result_code_raw,
+            new_result_text,
         )
 
-        # Prepare update payloads
-        date_typed_value = {"_type": "date", "value": new_visit_date.isoformat()}
-        result_typed_value = {"_type": "text", "value": new_result_text}
+        if new_visit_date is None:
+            skipped += 1
+            logger.error("Skipping row %d: could not parse visit_date", row)
+            continue
+        if new_result_text is None:
+            skipped += 1
+            logger.error("Skipping row %d: could not map result code", row)
+            continue
 
-        date_update = _build_update_dto_by_eigenschap_uuid(LSDEEL_EIGENSCHAP_DATUM_UUID, date_typed_value)
-        result_update = _build_update_dto_by_eigenschap_uuid(LSDEEL_EIGENSCHAP_RESULTAAT_UUID, result_typed_value)
+        if _should_skip_due_to_result(new_result_text):
+            skipped += 1
+            logger.info("Skipping row %d: result indicates buiten gebruik (%r)", row, new_result_text)
+            continue
 
-        logger.info("Prepared update (no existing values): datum laatste keuring uuid=%s -> %s", LSDEEL_EIGENSCHAP_DATUM_UUID, date_typed_value)
-        logger.info("Prepared update (no existing values): resultaat keuring uuid=%s -> %s", LSDEEL_EIGENSCHAP_RESULTAAT_UUID, result_typed_value)
+        attempted += 1
+        ok = _apply_updates_for_asset(
+            eminfra=eminfra,
+            asset_uuid=asset_uuid,
+            new_visit_date=new_visit_date,
+            new_result_text=new_result_text,
+            apply=bool(args.apply),
+        )
 
-        if not args.apply:
-            logger.warning("DRY-RUN: not applying updates. Re-run with --apply to PATCH.")
-            return 0
-
-        eminfra.eigenschap_service.update_eigenschap_by_uuid(asset_uuid, date_update)
-        eminfra.eigenschap_service.update_eigenschap_by_uuid(asset_uuid, result_update)
-        logger.info("Applied updates for asset %s", asset_uuid)
-        return 0
-
-    ev_date = _find_eigenschap_by_name(eigs, "datum laatste keuring")
-    ev_result = _find_eigenschap_by_name(eigs, "resultaat keuring")
-
-    if ev_date is None:
-        logger.error("Could not find eigenschap 'datum laatste keuring' on asset %s", asset_uuid)
-        return 2
-    if ev_result is None:
-        logger.error("Could not find eigenschap 'resultaat keuring' on asset %s", asset_uuid)
-        return 2
-
-    logger.info(
-        "Target eigenschap UUIDs | datum laatste keuring=%s | resultaat keuring=%s",
-        getattr(ev_date.eigenschap, "uuid", None),
-        getattr(ev_result.eigenschap, "uuid", None),
-    )
-
-    # Prepare update payloads. Use the same typedValue shape as returned by the API.
-    # From user sample:
-    # - date:  {"_type": "date", "value": "YYYY-MM-DD"}
-    # - text:  {"_type": "text", "value": "..."}
-    # - selection values are represented as text typedValue in existing payload; we follow that.
-
-    try:
-        logger.info("Current typedValue (datum laatste keuring): %s", getattr(ev_date, "typedValue", None))
-        logger.info("Current typedValue (resultaat keuring): %s", getattr(ev_result, "typedValue", None))
-    except Exception:
-        pass
-
-    date_typed_value = {"_type": "date", "value": new_visit_date.isoformat()}
-    # Result is a selection in the schema, but the API returns typedValue as text.
-    result_typed_value = {"_type": "text", "value": new_result_text}
-
-    date_update = _build_update_dto(ev_date, date_typed_value)
-    result_update = _build_update_dto(ev_result, result_typed_value)
-
-    logger.info("DRY-RUN prepared update: datum laatste keuring -> %s", date_typed_value)
-    logger.info("DRY-RUN prepared update: resultaat keuring -> %s", result_typed_value)
+        if ok:
+            if args.apply:
+                applied += 1
+        else:
+            skipped += 1
 
     if not args.apply:
         logger.warning("DRY-RUN: not applying updates. Re-run with --apply to PATCH.")
-        return 0
 
-    eminfra.eigenschap_service.update_eigenschap_by_uuid(asset_uuid, date_update)
-    eminfra.eigenschap_service.update_eigenschap_by_uuid(asset_uuid, result_update)
+    logger.info(
+        "Done. rows=%d attempted=%d applied=%d skipped=%d",
+        len(rows_to_process),
+        attempted,
+        applied,
+        skipped,
+    )
 
-    logger.info("Applied updates for asset %s", asset_uuid)
     return 0
 
 
