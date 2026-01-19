@@ -102,17 +102,30 @@ class EigenschapService:
         json_dict = self.requester.get(url).json()
         return [Eigenschap.from_dict(item) for item in json_dict['data']]
 
-    def get_eigenschappen(self, asset_uuid: str, eigenschap_naam: str = None) -> list[EigenschapValueDTO]:
+    def get_eigenschappen(self, asset_uuid: str, eigenschap_naam: str = None, kenmerk_uuid: str | None = None) -> list[EigenschapValueDTO]:
+        """Get eigenschapwaarden for an asset.
+
+        If kenmerk_uuid is provided, it will be used directly.
+        Otherwise, we auto-detect the 'Eigenschappen - ...' kenmerk type.
+        """
+
         # ophalen kenmerk_uuid
-        kenmerk_sercvice = KenmerkService(requester=self.requester)
-        kenmerken = kenmerk_sercvice.get_kenmerken_by_uuid(asset_uuid=asset_uuid)
-        kenmerk_uuid = \
-            [kenmerk.type.get('uuid') for kenmerk in kenmerken if kenmerk.type.get('naam').startswith('Eigenschappen')][0]
+        if kenmerk_uuid is None:
+            kenmerk_sercvice = KenmerkService(requester=self.requester)
+            kenmerken = kenmerk_sercvice.get_kenmerken_by_uuid(asset_uuid=asset_uuid)
+
+            # pick the first kenmerk whose type naam starts with 'Eigenschappen'
+            eig_kenmerken = [k for k in kenmerken if (k.type or {}).get('naam', '').startswith('Eigenschappen')]
+            if not eig_kenmerken:
+                return []
+            kenmerk_uuid = (eig_kenmerken[0].type or {}).get('uuid')
+            if not kenmerk_uuid:
+                return []
 
         # ophalen alle eigenschapwaarden
         url = f'core/api/assets/{asset_uuid}/kenmerken/{kenmerk_uuid}/eigenschapwaarden'
         json_dict = self.requester.get(url).json()
-        eigenschappen = [EigenschapValueDTO.from_dict(item) for item in json_dict['data']]
+        eigenschappen = [EigenschapValueDTO.from_dict(item) for item in json_dict.get('data', [])]
 
         # optioneel eigenschap waarden filteren
         if eigenschap_naam:
