@@ -45,7 +45,7 @@ def normalize_installation_number(value: Any) -> str:
     - strip() leading/trailing whitespace
     - remove any whitespace inside the string (spaces, NBSP, tabs, ...)
 
-    This matches the user's requirement: "kolom E is the installation number; if it has spaces, ignore it".
+    This matches the user's requirement: "kolom E is de installatie nummer; als er spaties zijn, negeer ze dan".
     """
 
     if value is None:
@@ -161,6 +161,50 @@ def _normalize_for_matching(value: Any) -> str:
     return normalize_installation_number(value)
 
 
+def extract_valid_installation_number(raw_installation: Any) -> Optional[str]:
+    """
+    Extract and validate an installation number.
+    Accepts two valid formats:
+      - (WO|WW|A|C|G) followed by exactly 4 digits, e.g. A1234, WO1234
+      - 3 digits, then letter A/C/G, then 1 digit, e.g. 123A1
+    The input may contain spaces around the letter (e.g. '123 A 1'), so we try multiple
+    strategies:
+      1. Check each whitespace-separated token after stripping
+      2. Check the entire string once all whitespace is removed
+      3. Fallback: strip non-alphanumerics from the first token and re-check
+
+    Returns the cleaned installation number (uppercase, no spaces) or None if invalid.
+    """
+    pattern1 = re.compile(r'^(?:WO|WW|A|C|G)\d{4}$', re.IGNORECASE)
+    pattern2 = re.compile(r'^\d{3}[ACG]\d$', re.IGNORECASE)
+
+    if raw_installation is None:
+        return None
+
+    s = str(raw_installation).strip()
+    if not s:
+        return None
+
+    # 1) Try each whitespace-separated token (covers many simple cases)
+    for token in s.split():
+        cand = re.sub(r'\s+', '', token).upper()
+        if pattern1.match(cand) or pattern2.match(cand):
+            return cand
+
+    # 2) Try the whole string with all whitespace removed (covers '123 A 1', 'A 1234', etc.)
+    s_no_ws = re.sub(r'\s+', '', s).upper()
+    if pattern1.match(s_no_ws) or pattern2.match(s_no_ws):
+        return s_no_ws
+
+    # 3) Fallback: keep only alphanumeric from the first token and re-test
+    first = s.split()[0]
+    cand_alnum = re.sub(r'[^A-Z0-9]', '', first.upper())
+    if pattern1.match(cand_alnum) or pattern2.match(cand_alnum):
+        return cand_alnum
+
+    return None
+
+
 def _match_lsdeel_by_install_number(lsdeels: list[ArangoMatch], installation_number: str) -> tuple[str, Optional[ArangoMatch]]:
     """Return (status, match).
 
@@ -253,22 +297,13 @@ def enrich_workbook(
         processed += 1
         raw_install = ws.cell(row=r, column=installation_col).value
 
-        if raw_install is None or (isinstance(raw_install, str) and raw_install.strip() == ""):
+        valid_install = extract_valid_installation_number(raw_install)
+        if not valid_install:
             skipped_invalid_install += 1
             ws.cell(row=r, column=outcome_col, value="SKIP_INVALID")
             continue
 
-        if _has_any_whitespace(raw_install):
-            skipped_whitespace_install += 1
-            ws.cell(row=r, column=outcome_col, value="SKIP_WHITESPACE")
-            continue
-
-        install = _normalize_for_matching(raw_install)
-        if not install:
-            skipped_invalid_install += 1
-            ws.cell(row=r, column=outcome_col, value="SKIP_INVALID")
-            continue
-
+        install = valid_install
         if install not in cache:
             try:
                 cache[install] = _match_lsdeel_by_install_number(lsdeels, install)
@@ -374,22 +409,13 @@ def _enrich_workbook_with_preloaded_lsdeels(
         processed += 1
         raw_install = ws.cell(row=r, column=installation_col).value
 
-        if raw_install is None or (isinstance(raw_install, str) and raw_install.strip() == ""):
+        valid_install = extract_valid_installation_number(raw_install)
+        if not valid_install:
             skipped_invalid_install += 1
             ws.cell(row=r, column=outcome_col, value="SKIP_INVALID")
             continue
 
-        if _has_any_whitespace(raw_install):
-            skipped_whitespace_install += 1
-            ws.cell(row=r, column=outcome_col, value="SKIP_WHITESPACE")
-            continue
-
-        install = _normalize_for_matching(raw_install)
-        if not install:
-            skipped_invalid_install += 1
-            ws.cell(row=r, column=outcome_col, value="SKIP_INVALID")
-            continue
-
+        install = valid_install
         if install not in cache:
             cache[install] = _match_lsdeel_by_install_number(lsdeels, install)
 
@@ -588,3 +614,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
