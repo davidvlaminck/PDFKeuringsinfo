@@ -43,6 +43,9 @@ from API.eminfra.EMInfraDomain import Eigenschap, EigenschapValueUpdateDTO
 
 logger = logging.getLogger(__name__)
 
+# Toggle default dry-run behavior. Set to True to default to dry-run (no PATCH).
+# You can change this in the `if __name__ == "__main__"` block below.
+DEFAULT_DRY_RUN: bool = True
 
 RESULT_CODE_TO_TEXT: dict[int, str] = {
     1: "conform",
@@ -354,8 +357,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--excel",
         type=Path,
-        default=Path(__file__).resolve().parent / "reports.enriched.xlsx",
-        help="Path to an enriched Excel file to process (default: %(default)s)",
+        default=None,
+        help="Path to an enriched Excel file to process (default: process all *.enriched.xlsx in VincottePlatform)",
+    )
+    p.add_argument(
+        "--all",
+        action="store_true",
+        help="Process all *.xlsx files that contain '.enriched' in the filename in VincottePlatform/",
     )
     p.add_argument(
         "--debug-cols",
@@ -518,6 +526,13 @@ def main() -> int:
 
     args = _build_parser().parse_args()
 
+    # Respect module-level DEFAULT_DRY_RUN unless user explicitly passed --apply on CLI
+    user_provided_apply = "--apply" in sys.argv
+    if not user_provided_apply:
+        # DEFAULT_DRY_RUN == True -> args.apply = False (dry-run)
+        # DEFAULT_DRY_RUN == False -> args.apply = True (apply by default)
+        args.apply = not DEFAULT_DRY_RUN
+
     env_map = {
         "prd": Environment.PRD,
         "dev": Environment.DEV,
@@ -525,127 +540,184 @@ def main() -> int:
         "aim": Environment.AIM,
     }
 
-    excel_path: Path = args.excel
-    if not excel_path.exists():
-        logger.error("Excel not found: %s", excel_path)
-        return 2
+    base_dir = Path(__file__).resolve().parent
 
-    if args.apply and args.env == "prd" and not args.yes_really_apply_on_prd:
-        logger.error(
-            "Refusing to PATCH on PRD without --yes-really-apply-on-prd. "
-            "Run again with --apply --yes-really-apply-on-prd if you are sure."
-        )
-        return 2
-
-    # Load workbook once (needed for selecting rows and reading values)
-    wb = load_workbook(excel_path, data_only=True)
-    ws = wb.active
-
-    # Determine actual visit_date col (some exports use F instead of G)
-    visit_date_col = _find_visit_date_col(ws)
-
-    uuid_col = _find_col_by_header(ws, "Arango UUID")
-    if uuid_col is None:
-        logger.error("Could not find 'Arango UUID' header in %s", excel_path.name)
-        return 2
-
-    rows_to_process: list[int] = []
-
-    if args.row:
-        rows_to_process = [int(args.row)]
-    elif args.asset_uuid:
-        wanted = str(args.asset_uuid).strip()
-        for r in range(2, ws.max_row + 1):
-            v = ws.cell(row=r, column=uuid_col).value
-            if v is not None and str(v).strip() == wanted:
-                rows_to_process = [r]
-                break
-        if not rows_to_process:
-            logger.error("No row found with Arango UUID=%s", wanted)
+    # Build list of excel files to process: either the single file provided via --excel,
+    # or all files in the VincottePlatform dir that contain '.enriched' when --all is used
+    # or when --excel is not provided.
+    excel_paths: list[Path] = []
+    if args.all or args.excel is None:
+        candidates = [
+            p for p in sorted(base_dir.iterdir()) if p.is_file() and p.suffix.lower() == ".xlsx" and ".enriched" in p.name.lower()
+        ]
+        if not candidates:
+            logger.error("No enriched Excel files found in %s", base_dir)
             return 2
+        excel_paths = candidates
     else:
-        candidates = iter_candidates_from_excel(excel_path, debug=bool(args.debug_cols))
-        logger.info("Found %d candidate row(s) in %s", len(candidates), excel_path.name)
-        rows_to_process = [c.row_index for c in candidates]
+        if not args.excel.exists():
+            logger.error("Excel not found: %s", args.excel)
+            return 2
+        excel_paths = [args.excel]
 
-    if args.limit is not None:
-        rows_to_process = rows_to_process[: max(0, int(args.limit))]
+    # Determine whether the --apply flag was provided on the command line.
+    apply_passed_on_cli = "--apply" in sys.argv
 
-    if not rows_to_process:
-        logger.info("Nothing to do.")
-        return 0
+    # PRD safety logic:
+    # - If the user explicitly passed --apply on the CLI, require --yes-really-apply-on-prd.
+    # - If args.apply is True because DEFAULT_DRY_RUN was changed in-file (no --apply in argv),
+    #   treat that in-file override as an implicit confirmation: set args.yes_really_apply_on_prd
+    #   and log a conspicuous warning. This lets you flip DEFAULT_DRY_RUN in the file without
+    #   needing to pass an extra CLI flag.
+    if args.env == "prd" and args.apply:
+        if apply_passed_on_cli:
+            if not args.yes_really_apply_on_prd:
+                logger.error(
+                    "Refusing to PATCH on PRD without --yes-really-apply-on-prd. "
+                    "Run again with --apply --yes-really-apply-on-prd if you are sure."
+                )
+                return 2
+        else:
+            # In-file override: respect it and mark as confirmed.
+            logger.warning(
+                "DEFAULT_DRY_RUN has been disabled in-file; treating this as confirmation to apply on PRD."
+            )
+            args.yes_really_apply_on_prd = True
 
+    # Create EMInfraClient once and reuse for all files
     eminfra = EMInfraClient(env=env_map[args.env], auth_type=AuthType.JWT, settings_path=args.settings)
 
-    attempted = applied = skipped = 0
+    total_processed = total_attempted = total_applied = total_skipped = 0
 
-    for row in rows_to_process:
-        asset_uuid_raw = ws.cell(row=row, column=uuid_col).value
-        if asset_uuid_raw is None or str(asset_uuid_raw).strip() == "":
-            skipped += 1
-            logger.warning("Skipping row %d: missing Arango UUID", row)
+    for excel_path in excel_paths:
+        logger.info("Processing Excel: %s", excel_path.name)
+
+        wb = load_workbook(excel_path, data_only=True)
+        ws = wb.active
+
+        visit_date_col = _find_visit_date_col(ws)
+
+        uuid_col = _find_col_by_header(ws, "Arango UUID")
+        if uuid_col is None:
+            logger.error("Could not find 'Arango UUID' header in %s", excel_path.name)
+            # skip this file but continue with others
             continue
-        asset_uuid = str(asset_uuid_raw).strip()
 
-        result_code_raw = ws.cell(row=row, column=2).value  # column B
-        visit_date_raw = ws.cell(row=row, column=visit_date_col).value
+        rows_to_process: list[int] = []
 
-        new_visit_date = _parse_date(visit_date_raw)
-        new_result_text = _excel_result_code_to_text(result_code_raw)
+        if args.row:
+            rows_to_process = [int(args.row)]
+        elif args.asset_uuid:
+            wanted = str(args.asset_uuid).strip()
+            for r in range(2, ws.max_row + 1):
+                v = ws.cell(row=r, column=uuid_col).value
+                if v is not None and str(v).strip() == wanted:
+                    rows_to_process = [r]
+                    break
+            if not rows_to_process:
+                logger.error("No row found with Arango UUID=%s in %s", wanted, excel_path.name)
+                # continue to next file, don't treat as fatal
+                continue
+        else:
+            candidates = iter_candidates_from_excel(excel_path, debug=bool(args.debug_cols))
+            logger.info("Found %d candidate row(s) in %s", len(candidates), excel_path.name)
+            rows_to_process = [c.row_index for c in candidates]
+
+        if args.limit is not None:
+            rows_to_process = rows_to_process[: max(0, int(args.limit))]
+
+        if not rows_to_process:
+            logger.info("Nothing to do for %s.", excel_path.name)
+            continue
+
+        attempted = applied = skipped = 0
+
+        for row in rows_to_process:
+            asset_uuid_raw = ws.cell(row=row, column=uuid_col).value
+            if asset_uuid_raw is None or str(asset_uuid_raw).strip() == "":
+                skipped += 1
+                logger.warning("Skipping row %d: missing Arango UUID", row)
+                continue
+            asset_uuid = str(asset_uuid_raw).strip()
+
+            result_code_raw = ws.cell(row=row, column=2).value  # column B
+            visit_date_raw = ws.cell(row=row, column=visit_date_col).value
+
+            new_visit_date = _parse_date(visit_date_raw)
+            new_result_text = _excel_result_code_to_text(result_code_raw)
+
+            logger.info(
+                "Row %d | Arango UUID=%s | Excel visit_date(col %d raw)=%r -> %s | Excel result(raw)=%r -> %r",
+                row,
+                asset_uuid,
+                visit_date_col,
+                visit_date_raw,
+                new_visit_date,
+                result_code_raw,
+                new_result_text,
+            )
+
+            if new_visit_date is None:
+                skipped += 1
+                logger.error("Skipping row %d: could not parse visit_date", row)
+                continue
+            if new_result_text is None:
+                skipped += 1
+                logger.error("Skipping row %d: could not map result code", row)
+                continue
+
+            if _should_skip_due_to_result(new_result_text):
+                skipped += 1
+                logger.info("Skipping row %d: result indicates buiten gebruik (%r)", row, new_result_text)
+                continue
+
+            attempted += 1
+            ok = _apply_updates_for_asset(
+                eminfra=eminfra,
+                asset_uuid=asset_uuid,
+                new_visit_date=new_visit_date,
+                new_result_text=new_result_text,
+                apply=bool(args.apply),
+            )
+
+            if ok:
+                if args.apply:
+                    applied += 1
+            else:
+                skipped += 1
+
+        if not args.apply:
+            logger.warning("DRY-RUN for %s: not applying updates. Re-run with --apply to PATCH.", excel_path.name)
 
         logger.info(
-            "Row %d | Arango UUID=%s | Excel visit_date(col %d raw)=%r -> %s | Excel result(raw)=%r -> %r",
-            row,
-            asset_uuid,
-            visit_date_col,
-            visit_date_raw,
-            new_visit_date,
-            result_code_raw,
-            new_result_text,
+            "Done for %s. rows=%d attempted=%d applied=%d skipped=%d",
+            excel_path.name,
+            len(rows_to_process),
+            attempted,
+            applied,
+            skipped,
         )
 
-        if new_visit_date is None:
-            skipped += 1
-            logger.error("Skipping row %d: could not parse visit_date", row)
-            continue
-        if new_result_text is None:
-            skipped += 1
-            logger.error("Skipping row %d: could not map result code", row)
-            continue
-
-        if _should_skip_due_to_result(new_result_text):
-            skipped += 1
-            logger.info("Skipping row %d: result indicates buiten gebruik (%r)", row, new_result_text)
-            continue
-
-        attempted += 1
-        ok = _apply_updates_for_asset(
-            eminfra=eminfra,
-            asset_uuid=asset_uuid,
-            new_visit_date=new_visit_date,
-            new_result_text=new_result_text,
-            apply=bool(args.apply),
-        )
-
-        if ok:
-            if args.apply:
-                applied += 1
-        else:
-            skipped += 1
-
-    if not args.apply:
-        logger.warning("DRY-RUN: not applying updates. Re-run with --apply to PATCH.")
+        total_processed += len(rows_to_process)
+        total_attempted += attempted
+        total_applied += applied
+        total_skipped += skipped
 
     logger.info(
-        "Done. rows=%d attempted=%d applied=%d skipped=%d",
-        len(rows_to_process),
-        attempted,
-        applied,
-        skipped,
+        "All done. files=%d total_rows=%d attempted=%d applied=%d skipped=%d",
+        len(excel_paths),
+        total_processed,
+        total_attempted,
+        total_applied,
+        total_skipped,
     )
 
     return 0
 
 
 if __name__ == "__main__":
+    # Configure default dry-run behavior here. Set to False if you want the script
+    # to APPLY updates by default (unless overridden on the command line with --apply).
+    # Be cautious when setting this to False when targeting PRD.
+    DEFAULT_DRY_RUN = False  # keep dry-run as default for safety
     raise SystemExit(main())
