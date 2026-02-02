@@ -430,6 +430,19 @@ def _diagnose_eigenschappen(eminfra: EMInfraClient, asset_uuid: str) -> None:
         logger.exception("Diagnostics failed while listing kenmerken for asset %s", asset_uuid)
 
 
+def _extract_date_from_typedvalue(typedValue: Any) -> date | None:
+    if not typedValue:
+        return None
+    # Expecting dict like {'_type':'date','value':'YYYY-MM-DD'} or a plain string
+    try:
+        if isinstance(typedValue, dict):
+            val = typedValue.get("value")
+            return _parse_date(val)
+        return _parse_date(typedValue)
+    except Exception:
+        return None
+
+
 def _apply_updates_for_asset(
     *,
     eminfra: EMInfraClient,
@@ -437,6 +450,7 @@ def _apply_updates_for_asset(
     new_visit_date: date,
     new_result_text: str,
     apply: bool,
+    arango_date: date | None = None,
 ) -> bool:
     """Prepare (and optionally apply) the two updates for one asset.
 
@@ -446,6 +460,13 @@ def _apply_updates_for_asset(
     eigs = fetch_all_eigenschappen(eminfra, asset_uuid)
     logger.info("Fetched %d eigenschapwaarden", len(eigs))
 
+    # Determine current stored date, if any, from fetched eigenschappen
+    current_db_date: date | None = None
+    if eigs:
+        ev_date = _find_eigenschap_by_name(eigs, "datum laatste keuring")
+        if ev_date is not None:
+            current_db_date = _extract_date_from_typedvalue(getattr(ev_date, "typedValue", None))
+
     if not eigs:
         _diagnose_eigenschappen(eminfra, asset_uuid)
         logger.warning(
@@ -454,6 +475,16 @@ def _apply_updates_for_asset(
 
         date_typed_value = {"_type": "date", "value": new_visit_date.isoformat()}
         result_typed_value = {"_type": "text", "value": new_result_text}
+
+        # When no existing values: consult the arango_date provided (from the Excel 'Arango keuringsdatum' column)
+        if arango_date is not None and new_visit_date <= arango_date:
+            logger.info(
+                "Skipping update for %s: Excel visit_date %s is not more recent than Arango date %s",
+                asset_uuid,
+                new_visit_date,
+                arango_date,
+            )
+            return False
 
         date_update = _build_update_dto_by_eigenschap_uuid(LSDEEL_EIGENSCHAP_DATUM_UUID, date_typed_value)
         result_update = _build_update_dto_by_eigenschap_uuid(LSDEEL_EIGENSCHAP_RESULTAAT_UUID, result_typed_value)
@@ -476,45 +507,57 @@ def _apply_updates_for_asset(
         eminfra.eigenschap_service.update_eigenschap_by_uuid(asset_uuid, result_update)
         return True
 
-    ev_date = _find_eigenschap_by_name(eigs, "datum laatste keuring")
-    ev_result = _find_eigenschap_by_name(eigs, "resultaat keuring")
+    # If we have existing eigenschapwaarden, compare current_db_date (if available)
+    if eigs:
+        ev_date = _find_eigenschap_by_name(eigs, "datum laatste keuring")
+        ev_result = _find_eigenschap_by_name(eigs, "resultaat keuring")
 
-    if ev_date is None or ev_result is None:
-        logger.error(
-            "Missing required eigenschap on asset %s | datum laatste keuring found=%s | resultaat keuring found=%s",
-            asset_uuid,
-            ev_date is not None,
-            ev_result is not None,
+        if ev_date is None or ev_result is None:
+            logger.error(
+                "Missing required eigenschap on asset %s | datum laatste keuring found=%s | resultaat keuring found=%s",
+                asset_uuid,
+                ev_date is not None,
+                ev_result is not None,
+            )
+            return False
+
+        logger.info(
+            "Target eigenschap UUIDs | datum laatste keuring=%s | resultaat keuring=%s",
+            getattr(ev_date.eigenschap, "uuid", None),
+            getattr(ev_result.eigenschap, "uuid", None),
         )
-        return False
 
-    logger.info(
-        "Target eigenschap UUIDs | datum laatste keuring=%s | resultaat keuring=%s",
-        getattr(ev_date.eigenschap, "uuid", None),
-        getattr(ev_result.eigenschap, "uuid", None),
-    )
+        try:
+            logger.info("Current typedValue (datum laatste keuring): %s", getattr(ev_date, "typedValue", None))
+            logger.info("Current typedValue (resultaat keuring): %s", getattr(ev_result, "typedValue", None))
+        except Exception:
+            pass
 
-    try:
-        logger.info("Current typedValue (datum laatste keuring): %s", getattr(ev_date, "typedValue", None))
-        logger.info("Current typedValue (resultaat keuring): %s", getattr(ev_result, "typedValue", None))
-    except Exception:
-        pass
+        # If current DB date exists, only update when the Excel date is strictly more recent.
+        if current_db_date is not None and new_visit_date <= current_db_date:
+            logger.info(
+                "Skipping update for %s: Excel visit_date %s is not more recent than current DB date %s",
+                asset_uuid,
+                new_visit_date,
+                current_db_date,
+            )
+            return False
 
-    date_typed_value = {"_type": "date", "value": new_visit_date.isoformat()}
-    result_typed_value = {"_type": "text", "value": new_result_text}
+        date_typed_value = {"_type": "date", "value": new_visit_date.isoformat()}
+        result_typed_value = {"_type": "text", "value": new_result_text}
 
-    date_update = _build_update_dto(ev_date, date_typed_value)
-    result_update = _build_update_dto(ev_result, result_typed_value)
+        date_update = _build_update_dto(ev_date, date_typed_value)
+        result_update = _build_update_dto(ev_result, result_typed_value)
 
-    logger.info("Prepared update: datum laatste keuring -> %s", date_typed_value)
-    logger.info("Prepared update: resultaat keuring -> %s", result_typed_value)
+        logger.info("Prepared update: datum laatste keuring -> %s", date_typed_value)
+        logger.info("Prepared update: resultaat keuring -> %s", result_typed_value)
 
-    if not apply:
+        if not apply:
+            return True
+
+        eminfra.eigenschap_service.update_eigenschap_by_uuid(asset_uuid, date_update)
+        eminfra.eigenschap_service.update_eigenschap_by_uuid(asset_uuid, result_update)
         return True
-
-    eminfra.eigenschap_service.update_eigenschap_by_uuid(asset_uuid, date_update)
-    eminfra.eigenschap_service.update_eigenschap_by_uuid(asset_uuid, result_update)
-    return True
 
 
 def main() -> int:
@@ -678,6 +721,7 @@ def main() -> int:
                 new_visit_date=new_visit_date,
                 new_result_text=new_result_text,
                 apply=bool(args.apply),
+                arango_date=_parse_date(ws.cell(row=row, column=_find_col_by_header(ws, "Arango keuringsdatum")).value),
             )
 
             if ok:

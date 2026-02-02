@@ -4,3 +4,5 @@ python-arango>=8.2.5
 shapely
 PyJWT>=2.0.0
 cryptography
+Pillow
+ImageHash
