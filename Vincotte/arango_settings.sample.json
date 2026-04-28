@@ -1,0 +1,13 @@
+{
+  "databases": {
+    "prd": {
+      "database": "VulDatabaseNaamIn",
+      "user": "VulGebruikerIn",
+      "password": "VulWachtwoordIn",
+      "hosts": [
+        "http://localhost:8529"
+      ]
+    }
+  }
+}
+

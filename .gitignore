@@ -18,3 +18,10 @@ __pycache__/
 API/settings.json
 API/cred_onedrive.json
 
+# Vincotte Excel inputs/outputs
+Vincotte/*.xlsx
+Vincotte/*.xls
+Vincotte/*.xlsm
+
+# Vincotte local settings
+Vincotte/arango_settings.local.json
