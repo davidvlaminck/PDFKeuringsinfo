@@ -1,0 +1,25 @@
+[project]
+name = "pdfkeuringsinfo"
+version = "0.1.0"
+description = "Utilities and API clients for inspection data workflows"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "requests>=2.32.0",
+  "pandas>=2.2.0",
+  "openpyxl>=3.1.0",
+  "pytz>=2024.1",
+  "tqdm>=4.66.0",
+  "shapely>=2.0.0",
+  "PyJWT>=2.10.0",
+  "msal>=1.31.0",
+]
+
+[project.optional-dependencies]
+geo = [
+  "geopandas>=1.0.0",
+]
+
+[tool.uv]
+default-groups = []
+

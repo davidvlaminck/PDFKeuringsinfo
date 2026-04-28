@@ -1,82 +1,45 @@
 # PDFKeuringsinfo
 
-Tools om keuringsverslag-PDF's te analyseren.
+Deze repo gebruikt `uv` als standaard voor Python dependencies en run-commando's.
 
-## Run (simpel script)
-
-Dit project gebruikt één script dat je rechtstreeks kan uitvoeren:
+## 1) Eenmalige setup
 
 ```bash
-python3 "BTV MIV Keuringsverslagen WVB/detect_btv.py" "BTV MIV Keuringsverslagen WVB/pdfs/*.pdf"
+cd /home/davidlinux/PycharmProjects/PDFKeuringsinfo
+uv python install 3.12
+uv sync
 ```
 
-JSON output:
+## 2) Extra dependency-set voor geo functies
 
 ```bash
-python3 "BTV MIV Keuringsverslagen WVB/detect_btv.py" "BTV MIV Keuringsverslagen WVB/pdfs/*.pdf" --json
+cd /home/davidlinux/PycharmProjects/PDFKeuringsinfo
+uv sync --extra geo
 ```
 
-## Excel aanvullen (mapping + extractie)
+## 3) Scripts runnen
 
-Je kan de bron-Excel (`Lijst miv.xlsx`) automatisch aanvullen op basis van de PDF-bestandsnamen.
-Het script:
-
-- mapt PDF's naar een record in de Excel (op basis van MIV-nummer + suffix zoals `.1`)
-- schrijft de PDF-bestandsnaam weg
-- detecteert of de PDF **inleesbaar** is (tekstlaag aanwezig, dus geen pure scan)
-- als de PDF inleesbaar is: probeert het ook velden uit de PDF te halen:
-  - `Keuringsdatum`
-  - `Keuringsresultaat` (conform / conform met opmerkingen / niet conform)
-  - `Vastgestelde inbreuken`
-
-Voorbeeld:
+Voorbeelden:
 
 ```bash
-python3 "BTV MIV Keuringsverslagen WVB/detect_btv.py" \
-  --update-excel "BTV MIV Keuringsverslagen WVB/Lijst miv.xlsx" \
-  --pdf-dir "BTV MIV Keuringsverslagen WVB/pdfs" \
-  --excel-out "BTV MIV Keuringsverslagen WVB/Lijst miv.filled.xlsx" \
-  --max-pages 2
+cd /home/davidlinux/PycharmProjects/PDFKeuringsinfo
+uv run python API/debug.py
 ```
-
-> Tip: gebruik `--max-pages 2` als je ook de inbreuken wil mee opnemen (die staan vaak op p2).
-
-## PyCharm runner
-
-Er staat een convenience runner in de project-root:
-
-- `run_update_excel.py`
-
-Die voert dezelfde Excel-update uit, maar is handig om rechtstreeks vanuit PyCharm te starten.
-
-## Dependencies
-
-Het script gebruikt `pypdf`.
-
-Aanrader (met venv):
 
 ```bash
-python3 -m venv .venv
-. .venv/bin/activate
-python -m pip install -U pip
-python -m pip install -r requirements.txt
+cd /home/davidlinux/PycharmProjects/PDFKeuringsinfo
+uv run python API/OneDriveClient.py
 ```
 
-## Archiveren van `main`
+## 4) Setup check
 
-Voor een veilige reset/rebuild van de codebasis, volg het archiveringsproces in:
+```bash
+cd /home/davidlinux/PycharmProjects/PDFKeuringsinfo
+uv run python utils/check_setup.py
+```
 
-- `docs/archive-main.md`
+## 5) Lokale config
 
-## Rebuild op `main`
+- Gebruik `API/settings_sample.json` als basis voor je lokale `API/settings.json`.
+- Zet geen credentials in git.
 
-We starten de nieuwe codebasis rechtstreeks op `main`, met een afgescheiden werkzone:
-
-- `rebuild/README.md`
-- `rebuild/spec.md`
-- `docs/ai-handoff.md`
-
-Legacy snapshot blijft beschikbaar via:
-
-- branch `archive/main-20260428`
-- tag `archive-main-2026-04-28`
