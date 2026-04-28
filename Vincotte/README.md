@@ -17,6 +17,8 @@ Per record wordt eerst `Visiting place` gebruikt en, als daar geen geldig instal
 Een waarde is een geldig installatienummer als die matcht op:
 
 - `^(WO|WW)\d{4}$`
+- `^K[OW]\d{4}$`
+- `^[ACG]\d{4}$`
 - `^\d{3}[ACG]\d$`
 
 Voor een **100% zekere** match moet exact 1 asset voldoen aan beide voorwaarden:
@@ -32,6 +34,14 @@ Het script voegt deze kolommen toe in de enriched Excel:
 - `Arango Naam`
 - `Arango Naampad`
 - `Uitkomst enrich script`
+
+`Uitkomst enrich script` bevat nu duidelijke tekstwaarden:
+
+- `Match gevonden via Visiting place`
+- `Match gevonden via Description`
+- `Geen geldig installatienummer in Visiting place of Description`
+- `Geen match gevonden via Visiting place/Description`
+- `Meerdere matches op naam via Visiting place/Description; geen unieke asset`
 
 ## Gebruik met uv
 ```bash

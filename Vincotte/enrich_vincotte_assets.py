@@ -51,9 +51,41 @@ def extract_valid_installation_number(value: Any) -> str:
         return ""
 
     pattern_wo_ww = re.compile(r"^(?:WO|WW)\d{4}$", re.IGNORECASE)
+    pattern_ko_kw_4 = re.compile(r"^K[OW]\d{4}$", re.IGNORECASE)
+    pattern_acg_4 = re.compile(r"^[ACG]\d{4}$", re.IGNORECASE)
     pattern_3_l_1 = re.compile(r"^\d{3}[ACG]\d$", re.IGNORECASE)
-    if pattern_wo_ww.fullmatch(normalized) or pattern_3_l_1.fullmatch(normalized):
+
+    def is_valid_code(candidate: str) -> bool:
+        return bool(
+            pattern_wo_ww.fullmatch(candidate)
+            or pattern_ko_kw_4.fullmatch(candidate)
+            or pattern_acg_4.fullmatch(candidate)
+            or pattern_3_l_1.fullmatch(candidate)
+        )
+
+    if is_valid_code(normalized):
         return normalized.upper()
+
+    raw_text = str(value).strip()
+    # Accept common labels like 'Installatie nr: A5348' by stripping the prefix first.
+    without_label = re.sub(r"^\s*installatie\s*nr\s*[:\-\.]?\s*", "", raw_text, flags=re.IGNORECASE)
+
+    token_patterns = [
+        re.compile(r"(?<![A-Z0-9])K[OW]\s*\d{4}(?![A-Z0-9])", re.IGNORECASE),
+        re.compile(r"(?<![A-Z0-9])(?:WO|WW)\s*\d{4}(?![A-Z0-9])", re.IGNORECASE),
+        re.compile(r"(?<![A-Z0-9])[ACG]\s*\d{4}(?![A-Z0-9])", re.IGNORECASE),
+        re.compile(r"(?<![A-Z0-9])\d{3}\s*[ACG]\s*\d(?![A-Z0-9])", re.IGNORECASE),
+    ]
+
+    for search_text in (without_label, raw_text):
+        for pattern in token_patterns:
+            match = pattern.search(search_text)
+            if not match:
+                continue
+            candidate = normalize_installation_number(match.group(0))
+            if is_valid_code(candidate):
+                return candidate.upper()
+
     return ""
 
 
@@ -164,17 +196,22 @@ def _match_asset_strict(assets: list[AssetMatch], installation_number: str) -> t
         return "invalid_installation", None
 
     expected_name = f"{installation_number}.LSDeel".upper()
+    name_matches = [asset for asset in assets if asset.name.upper() == expected_name]
 
-    found: list[AssetMatch] = []
-    for asset in assets:
-        if asset.name.upper() == expected_name and asset.naampad_first == installation_number:
-            found.append(asset)
-            if len(found) > 1:
-                return "ambiguous", None
+    if not name_matches:
+        return "missing", None
 
-    if len(found) == 1:
-        return "unique", found[0]
-    return "missing", None
+    strict_matches = [asset for asset in name_matches if asset.naampad_first == installation_number]
+    if len(strict_matches) == 1:
+        return "unique", strict_matches[0]
+    if len(strict_matches) > 1:
+        return "ambiguous_name", None
+
+    # Fallback: one unique name match is still considered deterministic.
+    if len(name_matches) == 1:
+        return "unique", name_matches[0]
+
+    return "ambiguous_name", None
 
 
 def _default_output_path(input_path: Path) -> Path:
@@ -207,6 +244,21 @@ def _resolve_settings_path(cli_settings: Path | None) -> Path:
         return Path(env_path).resolve()
 
     return DEFAULT_SETTINGS_PATH.resolve()
+
+
+def _format_outcome_text(status: str, source_label: str) -> str:
+    """Convert internal status to clear user-facing output text."""
+    if status == "unique":
+        return f"Match gevonden via {source_label}"
+    if status == "invalid_installation":
+        return "Geen geldig installatienummer in Visiting place of Description"
+    if status == "missing":
+        return f"Geen match gevonden via {source_label}"
+    if status == "ambiguous_name":
+        return f"Meerdere matches op naam via {source_label}; geen unieke asset"
+    if status == "ambiguous":
+        return f"Meerdere matches gevonden via {source_label}; geen unieke asset"
+    return f"Onbekende uitkomst ({status}) via {source_label}"
 
 
 def enrich_workbook(
@@ -266,6 +318,7 @@ def enrich_workbook(
         "filled": 0,
         "invalid_installation": 0,
         "missing": 0,
+        "ambiguous_name": 0,
         "ambiguous": 0,
     }
 
@@ -284,7 +337,7 @@ def enrich_workbook(
         source_label = "Visiting place" if install_from_visiting else ("Description" if install_from_description else "none")
 
         status, match = _match_asset_strict(assets, candidate_install)
-        ws.cell(row=row_idx, column=outcome_col, value=f"{status} ({source_label})")
+        ws.cell(row=row_idx, column=outcome_col, value=_format_outcome_text(status, source_label))
 
         if status == "unique" and match is not None:
             ws.cell(row=row_idx, column=uuid_col, value=match.uuid)
@@ -292,7 +345,10 @@ def enrich_workbook(
             ws.cell(row=row_idx, column=naampad_col, value=match.naampad)
             stats["filled"] += 1
         else:
-            stats[status] += 1
+            if status in stats:
+                stats[status] += 1
+            else:
+                stats["missing"] += 1
 
     wb.save(output_path)
     return stats
