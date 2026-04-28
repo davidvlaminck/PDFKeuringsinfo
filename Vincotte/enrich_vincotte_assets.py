@@ -24,6 +24,7 @@ DEFAULT_INPUT_DIR = Path("/home/davidlinux/Documenten/AWV/Keuringen")
 DEFAULT_INPUT_PATH = DEFAULT_INPUT_DIR / DEFAULT_INPUT_FILENAME
 DEFAULT_SETTINGS_PATH = Path("/home/davidlinux/Documenten/AWV/resources/settings_SyncToArangoDB.json")
 DEFAULT_ASSETTYPE_SHORT_URI = "onderdeel#Laagspanningsbord"
+KNOWN_PROVINCE_CODES = {"AN", "OV", "VB", "WV", "LI", "VL", "BR"}
 
 
 @dataclass(frozen=True)
@@ -32,6 +33,14 @@ class AssetMatch:
     name: str
     naampad: str
     naampad_first: str
+
+
+@dataclass(frozen=True)
+class MivModuleMatch:
+    uuid: str
+    name: str
+    naampad: str
+    parent_path: str
 
 
 def normalize_installation_number(value: Any) -> str:
@@ -107,6 +116,39 @@ def extract_valid_installation_number(value: Any) -> str:
     return ""
 
 
+def _parent_path(naampad: str) -> str:
+    parts = naampad.split("/")
+    if len(parts) <= 1:
+        return ""
+    return "/".join(parts[:-1])
+
+
+def _extract_miv_module_name(value: Any) -> tuple[str, str | None]:
+    """Extract MIV module name from free text and optional province code."""
+    if value is None:
+        return "", None
+
+    text = str(value).upper()
+    match = re.search(r"\bMIV\s*(\d{3})\b", text)
+    if not match:
+        return "", None
+
+    digits = match.group(1)
+    module_name = f"MIV{digits}"
+    tail = text[match.end():]
+
+    sat_match = re.search(r"\bSS\s*([1-2])\b", tail)
+    if sat_match:
+        module_name = f"MIV{digits}.{sat_match.group(1)}"
+
+    province_code: str | None = None
+    prov_match = re.search(r"\b([A-Z]{2})\s+LVE\b", tail)
+    if prov_match:
+        province_code = prov_match.group(1)
+
+    return module_name, province_code
+
+
 def load_settings(settings_path: Path) -> dict[str, Any]:
     with settings_path.open("r", encoding="utf-8") as fh:
         return json.load(fh)
@@ -150,6 +192,20 @@ FOR a IN assets
   }
 """
 
+AQL_MIV_MODULES = """
+FOR a IN assets
+  LET at = DOCUMENT('assettypes', a.assettype_key)
+  FILTER at != null
+  FILTER CONTAINS(at.short_uri, 'installatie#MIVModule')
+  FILTER a.AIMDBStatus_isActief == true
+  FILTER a.NaampadObject_naampad != null
+  RETURN {
+    uuid: a._key,
+    name: a.AIMNaamObject_naam,
+    naampad: a.NaampadObject_naampad
+  }
+"""
+
 
 def fetch_active_assets_by_type(db, assettype_short_uri: str) -> list[AssetMatch]:
     cursor = db.aql.execute(
@@ -186,6 +242,55 @@ def fetch_active_assets_by_type(db, assettype_short_uri: str) -> list[AssetMatch
             )
         )
     return rows
+
+
+def fetch_active_miv_modules(db) -> list[MivModuleMatch]:
+    cursor = db.aql.execute(AQL_MIV_MODULES, batch_size=2000)
+    rows: list[MivModuleMatch] = []
+    for row in cursor:
+        uuid = (row or {}).get("uuid")
+        name = (row or {}).get("name")
+        naampad = (row or {}).get("naampad")
+        if not isinstance(uuid, str) or not isinstance(naampad, str):
+            continue
+        resolved_name = name if isinstance(name, str) else ""
+        rows.append(
+            MivModuleMatch(
+                uuid=uuid,
+                name=resolved_name,
+                naampad=naampad,
+                parent_path=_parent_path(naampad),
+            )
+        )
+    return rows
+
+
+def _match_asset_via_miv_tree(
+    *,
+    assets: list[AssetMatch],
+    miv_modules: list[MivModuleMatch],
+    miv_module_name: str,
+) -> tuple[str, AssetMatch | None]:
+    if not miv_module_name:
+        return "missing", None
+
+    module_matches = [m for m in miv_modules if m.name.upper() == miv_module_name.upper()]
+    if not module_matches:
+        return "missing", None
+    if len(module_matches) > 1:
+        return "ambiguous_name", None
+
+    module = module_matches[0]
+    siblings = [
+        a for a in assets
+        if _parent_path(a.naampad) == module.parent_path and a.name.upper().endswith(".LSDEEL")
+    ]
+
+    if len(siblings) == 1:
+        return "unique_miv_tree", siblings[0]
+    if len(siblings) > 1:
+        return "ambiguous_name", None
+    return "missing", None
 
 
 def _find_last_used_header_col(ws, header_row: int = 1) -> int:
@@ -289,6 +394,8 @@ def _resolve_settings_path(cli_settings: Path | None) -> Path:
 
 def _format_outcome_text(status: str, source_label: str, manual_correction: bool = False) -> str:
     """Convert internal status to clear user-facing output text."""
+    if status == "unique_miv_tree":
+        return f"Match via MIV in boomstructuur via {source_label}"
     if status == "unique":
         suffix = " na manuele correctie" if manual_correction else ""
         return f"Match gevonden via {source_label}{suffix}"
@@ -331,6 +438,9 @@ def enrich_workbook(
             f"Arango query failed for env '{env_key}' with settings '{settings_path}'."
         ) from exc
     logger.info("Fetched %d assets.", len(assets))
+    logger.info("Fetching active MIV modules...")
+    miv_modules = fetch_active_miv_modules(db)
+    logger.info("Fetched %d MIV modules.", len(miv_modules))
 
     wb = load_workbook(input_path)
     selected_ws = wb[sheet_name] if sheet_name else wb.active
@@ -358,11 +468,13 @@ def enrich_workbook(
     stats = {
         "processed": 0,
         "filled": 0,
+        "filled_miv_tree": 0,
         "invalid_installation": 0,
         "missing": 0,
         "ambiguous_name": 0,
         "ambiguous": 0,
     }
+    unknown_province_codes: set[str] = set()
 
     max_row = ws.max_row if limit_rows is None else min(ws.max_row, row_start + limit_rows - 1)
 
@@ -374,6 +486,8 @@ def enrich_workbook(
 
         install_from_visiting = extract_valid_installation_number(visiting_raw)
         install_from_description = extract_valid_installation_number(description_raw)
+        miv_from_visiting, province_from_visiting = _extract_miv_module_name(visiting_raw)
+        miv_from_description, province_from_description = _extract_miv_module_name(description_raw)
 
         manual_correction_applied = False
         if install_from_visiting == "013A4" and visiting_raw is not None and "0134A4" in normalize_installation_number(visiting_raw):
@@ -395,17 +509,35 @@ def enrich_workbook(
                     status, match = asw_status, asw_match
                     source_label = f"{source_label} (ASW->GEB.LSDeel)"
 
+        if status in {"missing", "invalid_installation"}:
+            miv_candidate = miv_from_visiting or miv_from_description
+            if miv_candidate:
+                miv_status, miv_match = _match_asset_via_miv_tree(
+                    assets=assets,
+                    miv_modules=miv_modules,
+                    miv_module_name=miv_candidate,
+                )
+                if miv_status in {"unique_miv_tree", "ambiguous_name"}:
+                    status, match = miv_status, miv_match
+                    source_label = "Visiting place" if miv_from_visiting else "Description"
+
+                province_code = province_from_visiting or province_from_description
+                if province_code and province_code not in KNOWN_PROVINCE_CODES:
+                    unknown_province_codes.add(province_code)
+
         ws.cell(
             row=row_idx,
             column=outcome_col,
             value=_format_outcome_text(status, source_label, manual_correction=manual_correction_applied),
         )
 
-        if status == "unique" and match is not None:
+        if status in {"unique", "unique_miv_tree"} and match is not None:
             ws.cell(row=row_idx, column=uuid_col, value=match.uuid)
             ws.cell(row=row_idx, column=name_col, value=match.name)
             ws.cell(row=row_idx, column=naampad_col, value=match.naampad)
             stats["filled"] += 1
+            if status == "unique_miv_tree":
+                stats["filled_miv_tree"] += 1
         else:
             if status in stats:
                 stats[status] += 1
@@ -413,6 +545,11 @@ def enrich_workbook(
                 stats["missing"] += 1
 
     wb.save(output_path)
+    if unknown_province_codes:
+        logger.warning(
+            "Unknown province code(s) in MIV input encountered: %s",
+            ", ".join(sorted(unknown_province_codes)),
+        )
     return stats
 
 

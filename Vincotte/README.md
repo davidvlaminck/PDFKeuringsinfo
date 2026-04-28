@@ -28,6 +28,11 @@ Extra parsingregels:
 - `Installatie nr: ...` (met variaties in leestekens/spaties) wordt ondersteund.
 - Hardcoded correctie: `0134A4` -> `013A4`.
 - ASW-fallback: `<code>.ASW` wordt omgezet naar `<code>.GEB.LSDeel` voor naam-matching.
+- MIV-varianten worden ondersteund:
+  - `MIV004 LVE` -> module `MIV004`
+  - `MIV 173 LVE` -> module `MIV173`
+  - `MIV004 SS1` / `MIV004 SS2` -> module `MIV004.1` / `MIV004.2`
+  - `MIV 110 AN LVE` -> module `MIV110` (provinciecode verwijderd)
 
 Voor een **100% zekere** match moet exact 1 asset voldoen aan beide voorwaarden:
 
@@ -47,10 +52,13 @@ Het script voegt deze kolommen toe in de enriched Excel:
 
 - `Match gevonden via Visiting place`
 - `Match gevonden via Description`
+- `Match via MIV in boomstructuur via Visiting place/Description`
 - `Match gevonden via ... na manuele correctie`
 - `Geen geldig installatienummer in Visiting place of Description`
 - `Geen match gevonden via Visiting place/Description`
 - `Meerdere matches op naam via Visiting place/Description; geen unieke asset`
+
+Onbekende provinciecodes in MIV-tekst worden gelogd als warning zodat je die kan valideren.
 
 ## Gebruik met uv
 ```bash
