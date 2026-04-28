@@ -61,3 +61,9 @@ python3 -m venv .venv
 python -m pip install -U pip
 python -m pip install -r requirements.txt
 ```
+
+## Archiveren van `main`
+
+Voor een veilige reset/rebuild van de codebasis, volg het archiveringsproces in:
+
+- `docs/archive-main.md`
