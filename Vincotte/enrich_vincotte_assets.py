@@ -53,6 +53,7 @@ def extract_valid_installation_number(value: Any) -> str:
     pattern_wo_ww = re.compile(r"^(?:WO|WW)\d{4}$", re.IGNORECASE)
     pattern_ko_kw_4 = re.compile(r"^K[OW]\d{4}$", re.IGNORECASE)
     pattern_acg_4 = re.compile(r"^[ACG]\d{4}$", re.IGNORECASE)
+    pattern_wad_3 = re.compile(r"^WAD\d{3}$", re.IGNORECASE)
     pattern_3_l_1 = re.compile(r"^\d{3}[ACG]\d$", re.IGNORECASE)
 
     def is_valid_code(candidate: str) -> bool:
@@ -60,8 +61,18 @@ def extract_valid_installation_number(value: Any) -> str:
             pattern_wo_ww.fullmatch(candidate)
             or pattern_ko_kw_4.fullmatch(candidate)
             or pattern_acg_4.fullmatch(candidate)
+            or pattern_wad_3.fullmatch(candidate)
             or pattern_3_l_1.fullmatch(candidate)
         )
+
+    # Hardcoded data correction requested by business.
+    if normalized == "0134A4":
+        normalized = "013A4"
+
+    # Normalize known textual suffix for pump stations: KW0515PS -> KW0515.
+    kw_with_suffix = re.fullmatch(r"(K[OW]\d{4})[A-Z]+", normalized, flags=re.IGNORECASE)
+    if kw_with_suffix:
+        normalized = kw_with_suffix.group(1).upper()
 
     if is_valid_code(normalized):
         return normalized.upper()
@@ -72,8 +83,10 @@ def extract_valid_installation_number(value: Any) -> str:
 
     token_patterns = [
         re.compile(r"(?<![A-Z0-9])K[OW]\s*\d{4}(?![A-Z0-9])", re.IGNORECASE),
+        re.compile(r"(?<![A-Z0-9])K[OW]\s*\d{4}[A-Z]+(?![A-Z0-9])", re.IGNORECASE),
         re.compile(r"(?<![A-Z0-9])(?:WO|WW)\s*\d{4}(?![A-Z0-9])", re.IGNORECASE),
         re.compile(r"(?<![A-Z0-9])[ACG]\s*\d{4}(?![A-Z0-9])", re.IGNORECASE),
+        re.compile(r"(?<![A-Z0-9])WAD\s*\d{3}(?![A-Z0-9])", re.IGNORECASE),
         re.compile(r"(?<![A-Z0-9])\d{3}\s*[ACG]\s*\d(?![A-Z0-9])", re.IGNORECASE),
     ]
 
@@ -83,6 +96,11 @@ def extract_valid_installation_number(value: Any) -> str:
             if not match:
                 continue
             candidate = normalize_installation_number(match.group(0))
+            kw_suffix = re.fullmatch(r"(K[OW]\d{4})[A-Z]+", candidate, flags=re.IGNORECASE)
+            if kw_suffix:
+                candidate = kw_suffix.group(1).upper()
+            if candidate == "0134A4":
+                candidate = "013A4"
             if is_valid_code(candidate):
                 return candidate.upper()
 
@@ -214,6 +232,29 @@ def _match_asset_strict(assets: list[AssetMatch], installation_number: str) -> t
     return "ambiguous_name", None
 
 
+def _extract_asw_target_name(value: Any) -> str:
+    """Extract ASW-style name token and transform to expected LSDeel name."""
+    if value is None:
+        return ""
+    raw = str(value)
+    match = re.search(r"([A-Z0-9]+(?:\.[A-Z0-9]+)*)\.ASW\b", raw, flags=re.IGNORECASE)
+    if not match:
+        return ""
+    prefix = match.group(1).upper()
+    return f"{prefix}.GEB.LSDEEL"
+
+
+def _match_asset_by_exact_name(assets: list[AssetMatch], expected_name_upper: str) -> tuple[str, AssetMatch | None]:
+    if not expected_name_upper:
+        return "missing", None
+    matches = [asset for asset in assets if asset.name.upper() == expected_name_upper]
+    if not matches:
+        return "missing", None
+    if len(matches) == 1:
+        return "unique", matches[0]
+    return "ambiguous_name", None
+
+
 def _default_output_path(input_path: Path) -> Path:
     return input_path.with_name(f"{input_path.stem}.enriched{input_path.suffix}")
 
@@ -246,10 +287,11 @@ def _resolve_settings_path(cli_settings: Path | None) -> Path:
     return DEFAULT_SETTINGS_PATH.resolve()
 
 
-def _format_outcome_text(status: str, source_label: str) -> str:
+def _format_outcome_text(status: str, source_label: str, manual_correction: bool = False) -> str:
     """Convert internal status to clear user-facing output text."""
     if status == "unique":
-        return f"Match gevonden via {source_label}"
+        suffix = " na manuele correctie" if manual_correction else ""
+        return f"Match gevonden via {source_label}{suffix}"
     if status == "invalid_installation":
         return "Geen geldig installatienummer in Visiting place of Description"
     if status == "missing":
@@ -333,11 +375,31 @@ def enrich_workbook(
         install_from_visiting = extract_valid_installation_number(visiting_raw)
         install_from_description = extract_valid_installation_number(description_raw)
 
+        manual_correction_applied = False
+        if install_from_visiting == "013A4" and visiting_raw is not None and "0134A4" in normalize_installation_number(visiting_raw):
+            manual_correction_applied = True
+        if not install_from_visiting and install_from_description == "013A4" and description_raw is not None and "0134A4" in normalize_installation_number(description_raw):
+            manual_correction_applied = True
+
         candidate_install = install_from_visiting or install_from_description
         source_label = "Visiting place" if install_from_visiting else ("Description" if install_from_description else "none")
 
         status, match = _match_asset_strict(assets, candidate_install)
-        ws.cell(row=row_idx, column=outcome_col, value=_format_outcome_text(status, source_label))
+
+        # ASW fallback: VASA01.ASW -> VASA01.GEB.LSDeel
+        if status in {"missing", "invalid_installation"}:
+            asw_target = _extract_asw_target_name(visiting_raw) or _extract_asw_target_name(description_raw)
+            if asw_target:
+                asw_status, asw_match = _match_asset_by_exact_name(assets, asw_target)
+                if asw_status in {"unique", "ambiguous_name"}:
+                    status, match = asw_status, asw_match
+                    source_label = f"{source_label} (ASW->GEB.LSDeel)"
+
+        ws.cell(
+            row=row_idx,
+            column=outcome_col,
+            value=_format_outcome_text(status, source_label, manual_correction=manual_correction_applied),
+        )
 
         if status == "unique" and match is not None:
             ws.cell(row=row_idx, column=uuid_col, value=match.uuid)

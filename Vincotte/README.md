@@ -19,7 +19,15 @@ Een waarde is een geldig installatienummer als die matcht op:
 - `^(WO|WW)\d{4}$`
 - `^K[OW]\d{4}$`
 - `^[ACG]\d{4}$`
+- `^WAD\d{3}$`
 - `^\d{3}[ACG]\d$`
+
+Extra parsingregels:
+
+- `KW0515PS` wordt behandeld als `KW0515`.
+- `Installatie nr: ...` (met variaties in leestekens/spaties) wordt ondersteund.
+- Hardcoded correctie: `0134A4` -> `013A4`.
+- ASW-fallback: `<code>.ASW` wordt omgezet naar `<code>.GEB.LSDeel` voor naam-matching.
 
 Voor een **100% zekere** match moet exact 1 asset voldoen aan beide voorwaarden:
 
@@ -39,6 +47,7 @@ Het script voegt deze kolommen toe in de enriched Excel:
 
 - `Match gevonden via Visiting place`
 - `Match gevonden via Description`
+- `Match gevonden via ... na manuele correctie`
 - `Geen geldig installatienummer in Visiting place of Description`
 - `Geen match gevonden via Visiting place/Description`
 - `Meerdere matches op naam via Visiting place/Description; geen unieke asset`
