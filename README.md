@@ -67,3 +67,16 @@ python -m pip install -r requirements.txt
 Voor een veilige reset/rebuild van de codebasis, volg het archiveringsproces in:
 
 - `docs/archive-main.md`
+
+## Rebuild op `main`
+
+We starten de nieuwe codebasis rechtstreeks op `main`, met een afgescheiden werkzone:
+
+- `rebuild/README.md`
+- `rebuild/spec.md`
+- `docs/ai-handoff.md`
+
+Legacy snapshot blijft beschikbaar via:
+
+- branch `archive/main-20260428`
+- tag `archive-main-2026-04-28`
