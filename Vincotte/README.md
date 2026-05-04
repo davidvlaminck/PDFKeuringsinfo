@@ -18,26 +18,51 @@ Een waarde is een geldig installatienummer als die matcht op:
 
 - `^(WO|WW)\d{4}$`
 - `^K[OW]\d{4}$`
+- `^XT[A-Z]{3}$`
+- `^OZ\d{4}$`
+- `^MET\d{5}$`
 - `^[ACG]\d{4}$`
-- `^WAD\d{3}$`
+- `^WA[DO]\d{3}$`
 - `^\d{3}[ACG]\d$`
 
 Extra parsingregels:
 
-- `KW0515PS` wordt behandeld als `KW0515`.
+- KW/KO-codes met 4 cijfers en suffix worden genormaliseerd naar de basiscode.
+  Voorbeelden: `KW0515PS` -> `KW0515`, `KW0017BR` / `KW0017BR1` -> `KW0017`, `KW0557/TU` / `KW0557TU` -> `KW0557`.
+- `MET 32007` wordt behandeld als `MET32007`.
 - `Installatie nr: ...` (met variaties in leestekens/spaties) wordt ondersteund.
 - Hardcoded correctie: `0134A4` -> `013A4`.
+- Hardcoded correctie: `WO0206` -> `111A8.WO0206`.
+- Hardcoded naampad-matches:
+  - `KW0060TU` -> `WEV.Tunnel.KW0060/KW0060.HSCab/LSGEDEELTE`
+  - `010A8` -> `K511.010A8/K511.010A8.K/K511.010A8.LsDeel`
+  - `239A8` -> `K307.239A8/K307.239A8.K/K307.239A8.LSDeel`
+  - `C0518A` of `C0518 A` -> `C0518/KAST_A/KAST_A.LSDeel`
+  - `C0518B` of `C0518 B` -> `C0518/KAST_B/KAST_B.LSDeel`
 - ASW-fallback: `<code>.ASW` wordt omgezet naar `<code>.GEB.LSDeel` voor naam-matching.
 - MIV-varianten worden ondersteund:
   - `MIV004 LVE` -> module `MIV004`
   - `MIV 173 LVE` -> module `MIV173`
   - `MIV004 SS1` / `MIV004 SS2` -> module `MIV004.1` / `MIV004.2`
   - `MIV 110 AN LVE` -> module `MIV110` (provinciecode verwijderd)
+- XT-sites worden ondersteund:
+  - patroon `XT` + 3 letters (bv. `XTAAL`)
+  - match via naampad op uniek laagspanningsbord (bv. `XTAAL/XTAAL/AAL.LSDeel`)
+- Zone30-sites worden ondersteund:
+  - patroon `OZ` + 4 cijfers (bv. `OZ0594`)
+  - match via tweede deel van het naampad (bv. `N9X45.35/OZ0594/N9P45.35.K/N9P45.35.K.LSDeel`)
+- Meteosites worden ondersteund:
+  - patroon `MET` + 5 cijfers (bv. `MET71001` of `MET 32007`)
+  - match op uniek laagspanningsbord (bv. `MET71001/MET71001_Neerpelt/MET71001.K/MET71001.LSDeel`)
 
 Voor een **100% zekere** match moet exact 1 asset voldoen aan beide voorwaarden:
 
 1. `AIMNaamObject_naam == "<installatienummer>.LSDeel"`
 2. eerste deel van `naampad_parts` (fallback: eerste segment van `NaampadObject_naampad`) == `<installatienummer>`
+
+Als die strikte naamvoorwaarde niet lukt, is er nu ook een minder zekere fallback:
+
+- unieke match enkel op eerste deel van `naampad_parts` == `<installatienummer>`.
 
 ## Outputkolommen
 
@@ -52,6 +77,9 @@ Het script voegt deze kolommen toe in de enriched Excel:
 
 - `Match gevonden via Visiting place`
 - `Match gevonden via Description`
+- `Match gevonden via Visiting place/Description, enkel via naampad`
+- `Match via OZ-zone30 naampad via Visiting place/Description`
+- `Match via XT-site naampad via Visiting place/Description`
 - `Match via MIV in boomstructuur via Visiting place/Description`
 - `Match gevonden via ... na manuele correctie`
 - `Geen geldig installatienummer in Visiting place of Description`

@@ -25,6 +25,18 @@ DEFAULT_INPUT_PATH = DEFAULT_INPUT_DIR / DEFAULT_INPUT_FILENAME
 DEFAULT_SETTINGS_PATH = Path("/home/davidlinux/Documenten/AWV/resources/settings_SyncToArangoDB.json")
 DEFAULT_ASSETTYPE_SHORT_URI = "onderdeel#Laagspanningsbord"
 KNOWN_PROVINCE_CODES = {"AN", "OV", "VB", "WV", "LI", "VL", "BR"}
+MANUAL_INSTALLATION_CORRECTIONS = {
+    "0134A4": "013A4",
+    "WO0206": "111A8.WO0206",
+}
+
+MANUAL_INPUT_NAAMPAD_MATCHES = {
+    "KW0060TU": "WEV.Tunnel.KW0060/KW0060.HSCab/LSGEDEELTE",
+    "010A8": "K511.010A8/K511.010A8.K/K511.010A8.LsDeel",
+    "239A8": "K307.239A8/K307.239A8.K/K307.239A8.LSDeel",
+    "C0518A": "C0518/KAST_A/KAST_A.LSDeel",
+    "C0518B": "C0518/KAST_B/KAST_B.LSDeel",
+}
 
 
 @dataclass(frozen=True)
@@ -33,6 +45,7 @@ class AssetMatch:
     name: str
     naampad: str
     naampad_first: str
+    naampad_second: str
 
 
 @dataclass(frozen=True)
@@ -53,6 +66,27 @@ def normalize_installation_number(value: Any) -> str:
     return re.sub(r"\s+", "", s).upper()
 
 
+def _normalize_kw_variants(candidate: str) -> str:
+    """Normalize KW/KO suffix variants to base code (4 digits)."""
+    c = candidate.upper()
+    # Allow slash variants like KW0557/TU or KW005/SL.
+    c = re.sub(r"/(?:[A-Z0-9]+)$", "", c, flags=re.IGNORECASE)
+    # Examples: KW0017BR1, KW0017BR, KW0557TU, KW0515PS, KW005SL -> base code.
+    m = re.fullmatch(r"(K[OW]\d{4})(?:[A-Z]+\d*)$", c, flags=re.IGNORECASE)
+    if m:
+        return m.group(1).upper()
+    return c
+
+
+def _normalize_wo_ww_suffix(candidate: str) -> str:
+    """Normalize WO/WW patterns with trailing letters (e.g. WO0972VL -> WO0972)."""
+    c = candidate.upper()
+    m = re.fullmatch(r"((?:WO|WW)\d{4})[A-Z]+", c, flags=re.IGNORECASE)
+    if m:
+        return m.group(1).upper()
+    return c
+
+
 def extract_valid_installation_number(value: Any) -> str:
     """Return normalized installation number when it matches expected patterns, else ''."""
     normalized = normalize_installation_number(value)
@@ -60,26 +94,36 @@ def extract_valid_installation_number(value: Any) -> str:
         return ""
 
     pattern_wo_ww = re.compile(r"^(?:WO|WW)\d{4}$", re.IGNORECASE)
-    pattern_ko_kw_4 = re.compile(r"^K[OW]\d{4}$", re.IGNORECASE)
+    pattern_ko_kw = re.compile(r"^K[OW]\d{4}$", re.IGNORECASE)
     pattern_acg_4 = re.compile(r"^[ACG]\d{4}$", re.IGNORECASE)
     pattern_wad_3 = re.compile(r"^WAD\d{3}$", re.IGNORECASE)
+    pattern_wod_3 = re.compile(r"^WOD\d{3}$", re.IGNORECASE)
+    pattern_xt_3 = re.compile(r"^XT[A-Z]{3}$", re.IGNORECASE)
+    pattern_oz_4 = re.compile(r"^OZ\d{4}$", re.IGNORECASE)
+    pattern_met_5 = re.compile(r"^MET\d{5}$", re.IGNORECASE)
     pattern_3_l_1 = re.compile(r"^\d{3}[ACG]\d$", re.IGNORECASE)
 
     def is_valid_code(candidate: str) -> bool:
         return bool(
             pattern_wo_ww.fullmatch(candidate)
-            or pattern_ko_kw_4.fullmatch(candidate)
+            or pattern_ko_kw.fullmatch(candidate)
             or pattern_acg_4.fullmatch(candidate)
             or pattern_wad_3.fullmatch(candidate)
+            or pattern_wod_3.fullmatch(candidate)
+            or pattern_xt_3.fullmatch(candidate)
+            or pattern_oz_4.fullmatch(candidate)
+            or pattern_met_5.fullmatch(candidate)
             or pattern_3_l_1.fullmatch(candidate)
         )
 
-    # Hardcoded data correction requested by business.
-    if normalized == "0134A4":
-        normalized = "013A4"
+    if normalized in MANUAL_INSTALLATION_CORRECTIONS:
+        return MANUAL_INSTALLATION_CORRECTIONS[normalized]
 
-    # Normalize known textual suffix for pump stations: KW0515PS -> KW0515.
-    kw_with_suffix = re.fullmatch(r"(K[OW]\d{4})[A-Z]+", normalized, flags=re.IGNORECASE)
+    normalized = _normalize_kw_variants(normalized)
+    normalized = _normalize_wo_ww_suffix(normalized)
+
+    # Normalize textual KW suffixes to base code.
+    kw_with_suffix = re.fullmatch(r"(K[OW]\d{4})[A-Z]+\d*", normalized, flags=re.IGNORECASE)
     if kw_with_suffix:
         normalized = kw_with_suffix.group(1).upper()
 
@@ -91,11 +135,14 @@ def extract_valid_installation_number(value: Any) -> str:
     without_label = re.sub(r"^\s*installatie\s*nr\s*[:\-\.]?\s*", "", raw_text, flags=re.IGNORECASE)
 
     token_patterns = [
+        re.compile(r"(?<![A-Z0-9])K[OW]\s*\d{4}(?:\s*/\s*[A-Z0-9]+|[A-Z0-9]+)(?![A-Z0-9])", re.IGNORECASE),
         re.compile(r"(?<![A-Z0-9])K[OW]\s*\d{4}(?![A-Z0-9])", re.IGNORECASE),
-        re.compile(r"(?<![A-Z0-9])K[OW]\s*\d{4}[A-Z]+(?![A-Z0-9])", re.IGNORECASE),
         re.compile(r"(?<![A-Z0-9])(?:WO|WW)\s*\d{4}(?![A-Z0-9])", re.IGNORECASE),
         re.compile(r"(?<![A-Z0-9])[ACG]\s*\d{4}(?![A-Z0-9])", re.IGNORECASE),
-        re.compile(r"(?<![A-Z0-9])WAD\s*\d{3}(?![A-Z0-9])", re.IGNORECASE),
+        re.compile(r"(?<![A-Z0-9])WA[DO]\s*\d{3}(?![A-Z0-9])", re.IGNORECASE),
+        re.compile(r"(?<![A-Z0-9])XT\s*[A-Z]{3}(?![A-Z0-9])", re.IGNORECASE),
+        re.compile(r"(?<![A-Z0-9])OZ\s*\d{4}(?![A-Z0-9])", re.IGNORECASE),
+        re.compile(r"(?<![A-Z0-9])MET\s*\d{5}(?![A-Z0-9])", re.IGNORECASE),
         re.compile(r"(?<![A-Z0-9])\d{3}\s*[ACG]\s*\d(?![A-Z0-9])", re.IGNORECASE),
     ]
 
@@ -105,11 +152,13 @@ def extract_valid_installation_number(value: Any) -> str:
             if not match:
                 continue
             candidate = normalize_installation_number(match.group(0))
-            kw_suffix = re.fullmatch(r"(K[OW]\d{4})[A-Z]+", candidate, flags=re.IGNORECASE)
+            candidate = _normalize_kw_variants(candidate)
+            candidate = _normalize_wo_ww_suffix(candidate)
+            kw_suffix = re.fullmatch(r"(K[OW]\d{4})[A-Z]+\d*", candidate, flags=re.IGNORECASE)
             if kw_suffix:
                 candidate = kw_suffix.group(1).upper()
-            if candidate == "0134A4":
-                candidate = "013A4"
+            if candidate in MANUAL_INSTALLATION_CORRECTIONS:
+                return MANUAL_INSTALLATION_CORRECTIONS[candidate]
             if is_valid_code(candidate):
                 return candidate.upper()
 
@@ -226,12 +275,19 @@ def fetch_active_assets_by_type(db, assettype_short_uri: str) -> list[AssetMatch
         resolved_name = name if isinstance(name, str) else ""
 
         first_part = ""
+        second_part = ""
         if isinstance(naampad_parts, list) and naampad_parts:
             candidate = naampad_parts[0]
             if isinstance(candidate, str):
                 first_part = normalize_installation_number(candidate)
+            if len(naampad_parts) > 1 and isinstance(naampad_parts[1], str):
+                second_part = normalize_installation_number(naampad_parts[1])
         if not first_part:
             first_part = normalize_installation_number(naampad.split("/")[0])
+        if not second_part:
+            parts = naampad.split("/")
+            if len(parts) > 1:
+                second_part = normalize_installation_number(parts[1])
 
         rows.append(
             AssetMatch(
@@ -239,6 +295,7 @@ def fetch_active_assets_by_type(db, assettype_short_uri: str) -> list[AssetMatch
                 name=resolved_name,
                 naampad=naampad,
                 naampad_first=first_part,
+                naampad_second=second_part,
             )
         )
     return rows
@@ -337,6 +394,19 @@ def _match_asset_strict(assets: list[AssetMatch], installation_number: str) -> t
     return "ambiguous_name", None
 
 
+def _match_asset_by_naampad_first(assets: list[AssetMatch], installation_number: str) -> tuple[str, AssetMatch | None]:
+    """Lower-confidence fallback: uniquely match by naampad first segment only."""
+    if not installation_number:
+        return "invalid_installation", None
+
+    matches = [asset for asset in assets if asset.naampad_first == installation_number]
+    if len(matches) == 1:
+        return "unique_naampad_only", matches[0]
+    if len(matches) > 1:
+        return "ambiguous", None
+    return "missing", None
+
+
 def _extract_asw_target_name(value: Any) -> str:
     """Extract ASW-style name token and transform to expected LSDeel name."""
     if value is None:
@@ -358,6 +428,18 @@ def _match_asset_by_exact_name(assets: list[AssetMatch], expected_name_upper: st
     if len(matches) == 1:
         return "unique", matches[0]
     return "ambiguous_name", None
+
+
+def _match_asset_by_exact_naampad(assets: list[AssetMatch], expected_naampad: str) -> tuple[str, AssetMatch | None]:
+    if not expected_naampad:
+        return "missing", None
+    target = expected_naampad.upper()
+    matches = [asset for asset in assets if asset.naampad.upper() == target]
+    if not matches:
+        return "missing", None
+    if len(matches) == 1:
+        return "unique", matches[0]
+    return "ambiguous", None
 
 
 def _default_output_path(input_path: Path) -> Path:
@@ -392,13 +474,81 @@ def _resolve_settings_path(cli_settings: Path | None) -> Path:
     return DEFAULT_SETTINGS_PATH.resolve()
 
 
+def _extract_xt_site_code(value: Any) -> str:
+    """Extract XT site token (XT + 3 letters) from free text."""
+    if value is None:
+        return ""
+
+    normalized = normalize_installation_number(value)
+    if re.fullmatch(r"XT[A-Z]{3}", normalized):
+        return normalized
+
+    raw = str(value).upper()
+    match = re.search(r"(?<![A-Z0-9])(XT\s*[A-Z]{3})(?![A-Z0-9])", raw)
+    if not match:
+        return ""
+
+    candidate = normalize_installation_number(match.group(1))
+    if re.fullmatch(r"XT[A-Z]{3}", candidate):
+        return candidate
+    return ""
+
+
+def _match_asset_via_xt_naampad(
+    *,
+    assets: list[AssetMatch],
+    xt_site_code: str,
+) -> tuple[str, AssetMatch | None]:
+    if not xt_site_code:
+        return "missing", None
+
+    matches = [
+        asset
+        for asset in assets
+        if xt_site_code in asset.naampad.upper() and asset.name.upper().endswith(".LSDEEL")
+    ]
+
+    if len(matches) == 1:
+        return "unique_xt", matches[0]
+    if len(matches) > 1:
+        return "ambiguous_name", None
+    return "missing", None
+
+
+def _match_asset_via_oz_naampad_second(
+    *,
+    assets: list[AssetMatch],
+    oz_code: str,
+) -> tuple[str, AssetMatch | None]:
+    if not oz_code:
+        return "missing", None
+
+    matches = [
+        asset
+        for asset in assets
+        if asset.naampad_second == oz_code and asset.name.upper().endswith(".LSDEEL")
+    ]
+
+    if len(matches) == 1:
+        return "unique_oz", matches[0]
+    if len(matches) > 1:
+        return "ambiguous_name", None
+    return "missing", None
+
+
 def _format_outcome_text(status: str, source_label: str, manual_correction: bool = False) -> str:
     """Convert internal status to clear user-facing output text."""
+    if status == "unique_oz":
+        return f"Match via OZ-zone30 naampad via {source_label}"
+    if status == "unique_xt":
+        return f"Match via XT-site naampad via {source_label}"
     if status == "unique_miv_tree":
         return f"Match via MIV in boomstructuur via {source_label}"
     if status == "unique":
         suffix = " na manuele correctie" if manual_correction else ""
         return f"Match gevonden via {source_label}{suffix}"
+    if status == "unique_naampad_only":
+        return f"Match gevonden via {source_label}, enkel via naampad"
     if status == "invalid_installation":
         return "Geen geldig installatienummer in Visiting place of Description"
     if status == "missing":
@@ -468,7 +618,10 @@ def enrich_workbook(
     stats = {
         "processed": 0,
         "filled": 0,
+        "filled_oz": 0,
+        "filled_xt": 0,
         "filled_miv_tree": 0,
+        "filled_naampad_only": 0,
         "invalid_installation": 0,
         "missing": 0,
         "ambiguous_name": 0,
@@ -486,19 +639,56 @@ def enrich_workbook(
 
         install_from_visiting = extract_valid_installation_number(visiting_raw)
         install_from_description = extract_valid_installation_number(description_raw)
+        xt_from_visiting = _extract_xt_site_code(visiting_raw)
+        xt_from_description = _extract_xt_site_code(description_raw)
+        oz_from_visiting = extract_valid_installation_number(visiting_raw) if visiting_raw is not None else ""
+        oz_from_description = extract_valid_installation_number(description_raw) if description_raw is not None else ""
         miv_from_visiting, province_from_visiting = _extract_miv_module_name(visiting_raw)
         miv_from_description, province_from_description = _extract_miv_module_name(description_raw)
 
         manual_correction_applied = False
-        if install_from_visiting == "013A4" and visiting_raw is not None and "0134A4" in normalize_installation_number(visiting_raw):
-            manual_correction_applied = True
-        if not install_from_visiting and install_from_description == "013A4" and description_raw is not None and "0134A4" in normalize_installation_number(description_raw):
-            manual_correction_applied = True
+        manual_naampad_target = ""
+        manual_naampad_source = ""
+
+        if visiting_raw is not None:
+            manual_naampad_target = MANUAL_INPUT_NAAMPAD_MATCHES.get(normalize_installation_number(visiting_raw), "")
+            if manual_naampad_target:
+                manual_naampad_source = "Visiting place"
+        if not manual_naampad_target and description_raw is not None:
+            manual_naampad_target = MANUAL_INPUT_NAAMPAD_MATCHES.get(normalize_installation_number(description_raw), "")
+            if manual_naampad_target:
+                manual_naampad_source = "Description"
+
+        if visiting_raw is not None and install_from_visiting:
+            normalized_visiting = normalize_installation_number(visiting_raw)
+            for raw_value, corrected_value in MANUAL_INSTALLATION_CORRECTIONS.items():
+                if install_from_visiting == corrected_value and raw_value in normalized_visiting:
+                    manual_correction_applied = True
+                    break
+        if not install_from_visiting and description_raw is not None and install_from_description:
+            normalized_description = normalize_installation_number(description_raw)
+            for raw_value, corrected_value in MANUAL_INSTALLATION_CORRECTIONS.items():
+                if install_from_description == corrected_value and raw_value in normalized_description:
+                    manual_correction_applied = True
+                    break
 
         candidate_install = install_from_visiting or install_from_description
         source_label = "Visiting place" if install_from_visiting else ("Description" if install_from_description else "none")
 
-        status, match = _match_asset_strict(assets, candidate_install)
+        if manual_naampad_target:
+            status, match = _match_asset_by_exact_naampad(assets, manual_naampad_target)
+            if status in {"unique", "ambiguous"}:
+                source_label = manual_naampad_source or source_label
+                manual_correction_applied = True
+            else:
+                status, match = _match_asset_strict(assets, candidate_install)
+        else:
+            status, match = _match_asset_strict(assets, candidate_install)
+
+        if status == "missing" and candidate_install:
+            naampad_only_status, naampad_only_match = _match_asset_by_naampad_first(assets, candidate_install)
+            if naampad_only_status in {"unique_naampad_only", "ambiguous"}:
+                status, match = naampad_only_status, naampad_only_match
 
         # ASW fallback: VASA01.ASW -> VASA01.GEB.LSDeel
         if status in {"missing", "invalid_installation"}:
@@ -525,19 +715,47 @@ def enrich_workbook(
                 if province_code and province_code not in KNOWN_PROVINCE_CODES:
                     unknown_province_codes.add(province_code)
 
+        if status in {"missing", "invalid_installation"}:
+            xt_candidate = xt_from_visiting or xt_from_description
+            if xt_candidate:
+                xt_status, xt_match = _match_asset_via_xt_naampad(
+                    assets=assets,
+                    xt_site_code=xt_candidate,
+                )
+                if xt_status in {"unique_xt", "ambiguous_name"}:
+                    status, match = xt_status, xt_match
+                    source_label = "Visiting place" if xt_from_visiting else "Description"
+
+        if status in {"missing", "invalid_installation"}:
+            oz_candidate = oz_from_visiting or oz_from_description
+            if oz_candidate:
+                oz_status, oz_match = _match_asset_via_oz_naampad_second(
+                    assets=assets,
+                    oz_code=oz_candidate,
+                )
+                if oz_status in {"unique_oz", "ambiguous_name"}:
+                    status, match = oz_status, oz_match
+                    source_label = "Visiting place" if oz_from_visiting else "Description"
+
         ws.cell(
             row=row_idx,
             column=outcome_col,
             value=_format_outcome_text(status, source_label, manual_correction=manual_correction_applied),
         )
 
-        if status in {"unique", "unique_miv_tree"} and match is not None:
+        if status in {"unique", "unique_miv_tree", "unique_xt", "unique_oz", "unique_naampad_only"} and match is not None:
             ws.cell(row=row_idx, column=uuid_col, value=match.uuid)
             ws.cell(row=row_idx, column=name_col, value=match.name)
             ws.cell(row=row_idx, column=naampad_col, value=match.naampad)
             stats["filled"] += 1
             if status == "unique_miv_tree":
                 stats["filled_miv_tree"] += 1
+            if status == "unique_xt":
+                stats["filled_xt"] += 1
+            if status == "unique_oz":
+                stats["filled_oz"] += 1
+            if status == "unique_naampad_only":
+                stats["filled_naampad_only"] += 1
         else:
             if status in stats:
                 stats[status] += 1
