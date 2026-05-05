@@ -10,6 +10,16 @@ Deze map bevat de voorbereiding om een Vincotte Excel aan te vullen met asset UU
 - Het script overschrijft de bron-Excel nooit; output gaat altijd naar een apart `.enriched.xlsx` bestand.
 - De kolommen `Arango UUID`, `Arango Naam` en `Arango Naampad` worden aangevuld bij unieke match.
 
+## Aanvullende context
+
+- De Excel bevat een code in de kolom `Label`.
+- Kleurbetekenis van `Label`:
+  - Rood = niet conform
+  - Oranje = conform met opmerkingen
+  - Groen = conform
+- Er bestaan meerdere opmaakvarianten van keuringsdocumenten.
+- Voorlopig zijn enkel keuringen sinds `2021-01-01` relevant.
+
 ## Matchlogica (nu geïmplementeerd)
 
 Per record wordt eerst `Visiting place` gebruikt en, als daar geen geldig installatienummer in zit, `Description`.
@@ -125,3 +135,43 @@ Standaard run (zonder argumenten):
 cd /home/davidlinux/PycharmProjects/PDFKeuringsinfo
 uv run python Vincotte/enrich_vincotte_assets.py
 ```
+
+## Verificatie Label vs PDF-besluit
+
+Gebruik `verify_enriched_labels_from_pdf.py` om het resultaat in kolom `Label` te controleren tegen de besluittekst in het PDF-keuringsdocument.
+
+Aannames in de mapstructuur:
+
+- de enriched Excel staat in de `Keuringen`-map,
+- per record staat de submap in kolom `Site ID` (kolom A),
+- de PDF-bestandsnaam staat in kolom `FILENAME` (kolom L),
+- enkel records met `Visit date > 2021-01-01` worden meegenomen (standaard).
+
+Labelmapping:
+
+- `Red`/`Rood` -> niet conform
+- `Orange`/`Oranje` -> conform met opmerkingen
+- `Green`/`Groen` -> conform
+
+Run:
+
+```bash
+cd /home/davidlinux/PycharmProjects/PDFKeuringsinfo
+uv run python Vincotte/verify_enriched_labels_from_pdf.py \
+  --input "/home/davidlinux/Documenten/AWV/Keuringen/MyVinotte Min.Vl.Gemeenschap Reports list.enriched.xlsx"
+```
+
+Optioneel:
+
+```bash
+cd /home/davidlinux/PycharmProjects/PDFKeuringsinfo
+uv run python Vincotte/verify_enriched_labels_from_pdf.py \
+  --input "/home/davidlinux/Documenten/AWV/Keuringen/MyVinotte Min.Vl.Gemeenschap Reports list.enriched.xlsx" \
+  --output "/home/davidlinux/Documenten/AWV/Keuringen/MyVinotte Min.Vl.Gemeenschap Reports list.pdf-label-check.xlsx" \
+  --since-date 2021-01-01
+```
+
+Output:
+
+- Excel-rapport met verificatiestatus per rij (`MATCH`, `MISMATCH`, `UNKNOWN`, `PDF_MISSING`, `PDF_UNREADABLE`)
+- CSV met dezelfde resultaten (zelfde bestandsnaam, extensie `.csv`)
