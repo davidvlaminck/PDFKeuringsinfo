@@ -46,9 +46,31 @@ _ILLEGAL_XML_CHARS_RE = re.compile(
 
 def _sanitize_for_excel(value: Any) -> Any:
     """Strip illegal XML characters from strings so openpyxl can write them."""
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", errors="replace")
     if not isinstance(value, str):
         return value
     return _ILLEGAL_XML_CHARS_RE.sub("", value)
+
+
+def _sanitize_dataframe_for_excel(df: pd.DataFrame) -> pd.DataFrame:
+    """Sanitize all values and headers so Excel export does not fail on illegal chars."""
+    sanitized = df.copy()
+    sanitized.columns = [_sanitize_for_excel(str(col)) for col in sanitized.columns]
+    for col in sanitized.columns:
+        sanitized[col] = sanitized[col].map(_sanitize_for_excel)
+    return sanitized
+
+
+def _find_first_illegal_xml_value(df: pd.DataFrame) -> tuple[int, str, str] | None:
+    """Return first (row_index, column_name, snippet) containing illegal XML characters."""
+    for ridx, row in df.iterrows():
+        for col in df.columns:
+            value = row[col]
+            text = value.decode("utf-8", errors="replace") if isinstance(value, bytes) else value
+            if isinstance(text, str) and _ILLEGAL_XML_CHARS_RE.search(text):
+                return ridx, str(col), text[:120]
+    return None
 
 
 def _normalize_site_id(value: Any) -> str:
@@ -166,6 +188,19 @@ _RED_PATTERNS = [
     r"voldoet\s+niet\s+aan",
     r"niet\s+in\s+overeenstemming",
     r"niet\s+conform",
+    r"niet\s+teruggevonden",
+    r"niet\s+gevonden",
+    r"niet\s+worden\s+gecontroleerd",
+    r"niet\s+gecontroleerd",
+    r"geen\s+besluit\s+genomen",
+    r"geen\s+controle\s+uitgevoerd",
+    r"geen\s+controle\s+mogelijk",
+    r"controle\s+niet\s+mogelijk",
+    r"niet\s+bereikbaar",
+    # Encoded variants seen in some PDFs:
+    # "NIET WORDEN GECONTROLEERD" and "kon niet worden gecontroleerd"
+    r"OJFU[\x00-\x1f\s]*XPSEFO[\x00-\x1f\s]*HFDPOUSPMFFSE",
+    r"\]WRc[\x00-\x1f\s]*f\^aQR\][\x00-\x1f\s]*URP\^\]ca\^ZRRaQ",
 ]
 
 # Patterns for the "voldoet aan" base (compliance confirmed).
@@ -185,6 +220,82 @@ _REMARK_PATTERNS = [
     r"voorbehoud",
 ]
 
+_NO_REMARKS_PATTERNS = [
+    r"opmerk(?:ing(?:en)?)?\s*:\s*(?:-|\u2022)?\s*nihil\b",
+    r"geen\s+opmerk(?:ing(?:en)?)?\b",
+]
+
+_NIHIL_INBREUKEN_PATTERN = r"vastgestelde\s+inbreuken\s*:\s*(?:-|\u2022)?\s*nihil\b"
+
+# Patterns that appear as boilerplate in the checkbox-style template and are NOT informative.
+# In this layout both "VOLDOET AAN" and "VOLDOET NIET AAN" always appear; only one is checked.
+_CHECKBOX_TEMPLATE_BOILERPLATE_RED = frozenset({
+    r"voldoet\s+niet\s+aan",
+    r"niet\s+in\s+overeenstemming",
+})
+# Some PDFs use a custom font encoding where extracted text looks shifted/garbled.
+_ENCODED_INBREUKEN_PATTERN = r"[W7]BTUHFTUFMEF[\x00-\x1f]*JOCSFVLFO"
+_ENCODED_NIHIL_PATTERN = r"@WVWZ|OJIJM"
+_ENCODED_OPMERKINGEN_PATTERN = r"0QNFSLJOHFO|PQNFSLJOHFO"
+_ENCODED_OPMERKINGEN_NIHIL_PATTERN = (
+    r"(?:0QNFSLJOHFO|PQNFSLJOHFO)[\x00-\x1f\s:;,\-]*(?:@WVWZ|OJIJM)"
+)
+
+
+def _has_remarks_marker(normalized_text: str) -> bool:
+    if not normalized_text:
+        return False
+    for pat in _REMARK_PATTERNS:
+        if re.search(pat, normalized_text, flags=re.IGNORECASE):
+            return True
+    return False
+
+
+def _has_no_remarks_marker(normalized_text: str) -> bool:
+    if not normalized_text:
+        return False
+    for pat in _NO_REMARKS_PATTERNS:
+        if re.search(pat, normalized_text, flags=re.IGNORECASE):
+            return True
+    return False
+
+
+def _is_checkbox_template(normalized_besluit: str) -> bool:
+    """Return True when the BESLUIT section contains both "VOLDOET AAN" and "VOLDOET NIET AAN".
+
+    This is a fixed checkbox template where both options are always printed and only one is
+    visually checked (☑/□).  Text extraction cannot distinguish which box is ticked so the
+    presence of "VOLDOET NIET AAN" must not be treated as a RED signal in this layout.
+    """
+    has_voldoet = bool(
+        re.search(
+            r"de\s+elektrische\s+installatie\s+voldoet\s+aan\s+de",
+            normalized_besluit,
+            re.IGNORECASE,
+        )
+    )
+    has_voldoet_niet = bool(
+        re.search(
+            r"de\s+elektrische\s+installatie\s+voldoet\s+niet\s+aan\s+de",
+            normalized_besluit,
+            re.IGNORECASE,
+        )
+    )
+    return has_voldoet and has_voldoet_niet
+
+
+def _extract_pre_besluit_section(full_text: str) -> str:
+    """Return the part of the document that precedes the BESLUIT heading.
+
+    This typically contains the INBREUKEN / OPMERKINGEN sections.
+    """
+    match = re.search(r"(?im)^\s*BESLUIT\s*$", full_text)
+    if not match:
+        match = re.search(r"(?i)\bBESLUIT\b", full_text)
+    if not match:
+        return full_text
+    return full_text[: match.start()]
+
 
 def _classify_besluit_text(section_text: str, full_text: str) -> DecisionExtraction:
     """Classify the BESLUIT section into RED / ORANGE / GREEN / UNKNOWN.
@@ -199,6 +310,7 @@ def _classify_besluit_text(section_text: str, full_text: str) -> DecisionExtract
     """
     target = section_text if section_text else full_text
     normalized = _normalize_text(target).lower()
+    normalized_full = _normalize_text(full_text).lower()
 
     if not normalized:
         return DecisionExtraction(
@@ -210,8 +322,14 @@ def _classify_besluit_text(section_text: str, full_text: str) -> DecisionExtract
 
     excerpt = _normalize_text(target)[:400]
 
-    # Step 1 – RED: explicit non-compliance
+    # Detect checkbox template *before* running RED patterns.
+    is_checkbox_template = _is_checkbox_template(normalized)
+
+    # Step 1 – RED: explicit non-compliance (first inside BESLUIT, then full document).
     for pat in _RED_PATTERNS:
+        if is_checkbox_template and pat in _CHECKBOX_TEMPLATE_BOILERPLATE_RED:
+            # "VOLDOET NIET AAN" is boilerplate in this layout; skip it as RED signal.
+            continue
         if re.search(pat, normalized, flags=re.IGNORECASE):
             return DecisionExtraction(
                 verdict="RED",
@@ -219,6 +337,43 @@ def _classify_besluit_text(section_text: str, full_text: str) -> DecisionExtract
                 reason=f"Niet-conform indicator: /{pat}/",
                 section_excerpt=excerpt,
             )
+        if re.search(pat, normalized_full, flags=re.IGNORECASE):
+            return DecisionExtraction(
+                verdict="RED",
+                confidence="MEDIUM",
+                reason=f"Niet-conform indicator buiten BESLUIT: /{pat}/",
+                section_excerpt=excerpt,
+            )
+
+    # Step 1b – Checkbox template: determine verdicht via the INBREUKEN section.
+    if is_checkbox_template:
+        pre_besluit = _normalize_text(_extract_pre_besluit_section(full_text)).lower()
+        # Heuristic: "Nihil" directly under the INBREUKEN/OPMERKINGEN heading means no infractions.
+        inbreuken_nihil = bool(
+            re.search(
+                r"inbreuken.*?nihil|nota.*?nihil|\bnihil\b",
+                pre_besluit,
+                re.IGNORECASE | re.DOTALL,
+            )
+        )
+        if inbreuken_nihil:
+            # In this template "Nihil" appears under one combined heading that covers
+            # INBREUKEN, OPMERKINGEN *and* NOTA'S.  The word "opmerkingen" in that
+            # heading must not be treated as an actual remark, so we return GREEN
+            # directly instead of running the full-document remarks scan.
+            return DecisionExtraction(
+                verdict="GREEN",
+                confidence="MEDIUM",
+                reason="Checkbox template: INBREUKEN/OPMERKINGEN/NOTA'S = Nihil",
+                section_excerpt=excerpt,
+            )
+        # Infractions present in INBREUKEN section → non-compliant.
+        return DecisionExtraction(
+            verdict="RED",
+            confidence="MEDIUM",
+            reason="Checkbox template: INBREUKEN bevat inbreuken (geen Nihil)",
+            section_excerpt=excerpt,
+        )
 
     # Step 2 – GREEN base present?
     green_pat_hit = None
@@ -228,20 +383,80 @@ def _classify_besluit_text(section_text: str, full_text: str) -> DecisionExtract
             break
 
     if green_pat_hit:
+        section_has_remarks = _has_remarks_marker(normalized) and not _has_no_remarks_marker(normalized)
+        full_has_remarks = _has_remarks_marker(normalized_full) and not _has_no_remarks_marker(normalized_full)
         # Step 2a – upgrade to ORANGE if remarks are mentioned
-        for rpat in _REMARK_PATTERNS:
-            if re.search(rpat, normalized, flags=re.IGNORECASE):
-                return DecisionExtraction(
-                    verdict="ORANGE",
-                    confidence="HIGH",
-                    reason=f"Conform maar met opmerkingen (/{rpat}/)",
-                    section_excerpt=excerpt,
-                )
+        if section_has_remarks or full_has_remarks:
+            confidence = "HIGH" if section_has_remarks else "MEDIUM"
+            reason = "Conform maar met opmerkingen"
+            if full_has_remarks and not section_has_remarks:
+                reason += " (opmerkingen buiten BESLUIT gedetecteerd)"
+            return DecisionExtraction(
+                verdict="ORANGE",
+                confidence=confidence,
+                reason=reason,
+                section_excerpt=excerpt,
+            )
         # Step 2b – no remarks → GREEN
         return DecisionExtraction(
             verdict="GREEN",
             confidence="HIGH",
             reason=f"Conform zonder opmerkingen (/{green_pat_hit}/)",
+            section_excerpt=excerpt,
+        )
+
+    # Step 3 – Alternate conformity signal in some layouts: "Vastgestelde inbreuken: Nihil".
+    if re.search(_NIHIL_INBREUKEN_PATTERN, normalized, flags=re.IGNORECASE):
+        section_has_remarks = _has_remarks_marker(normalized) and not _has_no_remarks_marker(normalized)
+        full_has_remarks = _has_remarks_marker(normalized_full) and not _has_no_remarks_marker(normalized_full)
+        if section_has_remarks or full_has_remarks:
+            reason = "Conform op basis van 'Vastgestelde inbreuken: Nihil', met opmerkingen"
+            if full_has_remarks and not section_has_remarks:
+                reason += " (opmerkingen buiten BESLUIT gedetecteerd)"
+            return DecisionExtraction(
+                verdict="ORANGE",
+                confidence="MEDIUM",
+                reason=reason,
+                section_excerpt=excerpt,
+            )
+        return DecisionExtraction(
+            verdict="GREEN",
+            confidence="MEDIUM",
+            reason="Conform op basis van 'Vastgestelde inbreuken: Nihil'",
+            section_excerpt=excerpt,
+        )
+
+    # Step 4 - fallback for garbled custom-font extraction.
+    # Example markers seen in extracted text:
+    #   VASTGESTELDE INBREUKEN -> "7BTUHFTUFMEFJOCSFVLFO"
+    #   NIHIL -> "@WVWZ"
+    if re.search(_ENCODED_INBREUKEN_PATTERN, normalized, flags=re.IGNORECASE) and re.search(
+        _ENCODED_NIHIL_PATTERN, normalized, flags=re.IGNORECASE
+    ):
+        encoded_has_remarks = re.search(_ENCODED_OPMERKINGEN_PATTERN, normalized, flags=re.IGNORECASE)
+        encoded_remarks_are_nil = re.search(_ENCODED_OPMERKINGEN_NIHIL_PATTERN, normalized, flags=re.IGNORECASE)
+        if encoded_has_remarks and not encoded_remarks_are_nil:
+            return DecisionExtraction(
+                verdict="ORANGE",
+                confidence="LOW",
+                reason="Conform op basis van gecodeerde 'inbreuken: nihil'-markers, met opmerkingen",
+                section_excerpt=excerpt,
+            )
+        return DecisionExtraction(
+            verdict="GREEN",
+            confidence="LOW",
+            reason="Conform op basis van gecodeerde 'inbreuken: nihil'-markers",
+            section_excerpt=excerpt,
+        )
+
+    # Encoded variant where inbreuken are present and not marked as nihil.
+    if re.search(_ENCODED_INBREUKEN_PATTERN, normalized_full, flags=re.IGNORECASE) and not re.search(
+        _ENCODED_NIHIL_PATTERN, normalized_full, flags=re.IGNORECASE
+    ):
+        return DecisionExtraction(
+            verdict="RED",
+            confidence="LOW",
+            reason="Niet-conform op basis van gecodeerde 'vastgestelde inbreuken'-markers (geen nihil)",
             section_excerpt=excerpt,
         )
 
@@ -463,9 +678,26 @@ def verify_enriched_labels(
     result_rows.sort(key=lambda x: x.get("row_index", 0))
 
     result_df = pd.DataFrame(result_rows)
-    # Sanitize all string columns to remove illegal XML characters before writing to xlsx.
-    result_df = result_df.apply(lambda col: col.map(_sanitize_for_excel) if col.dtype == object else col)
-    result_df.to_excel(output_excel, index=False)
+    # Sanitize everything defensively before writing to xlsx.
+    result_df = _sanitize_dataframe_for_excel(result_df)
+    offending = _find_first_illegal_xml_value(result_df)
+    if offending is not None:
+        ridx, col, snippet = offending
+        filename_hint = ""
+        if "filename" in result_df.columns and 0 <= ridx < len(result_df):
+            filename_hint = f", filename='{result_df.iloc[ridx].get('filename', '')}'"
+        raise RuntimeError(
+            f"Illegale XML-karakters gedetecteerd op result-row {ridx}, kolom '{col}'{filename_hint}."
+            f" Waarde-start: {snippet!r}"
+        )
+
+    try:
+        result_df.to_excel(output_excel, index=False)
+    except Exception as exc:
+        filename_hint = ""
+        if "filename" in result_df.columns and not result_df.empty:
+            filename_hint = f"; voorbeeld filename='{result_df.iloc[0].get('filename', '')}'"
+        raise RuntimeError(f"Excel export mislukt ({output_excel}){filename_hint}: {exc}") from exc
     csv_path = output_excel.with_suffix(".csv")
     result_df.to_csv(csv_path, index=False)
 
