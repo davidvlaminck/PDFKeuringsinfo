@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib
 import logging
 import re
@@ -107,6 +108,12 @@ def _normalize_label(value: Any) -> str:
         "CONFORM",
         "OK",
     }
+    no_inspection_tokens = {
+        "GEEN_KEURING",
+        "GEENKEURING",
+        "GEENKEURINGSVERSLAG",
+        "DOCUMENTATIE",
+    }
 
     if token in red_tokens:
         return "RED"
@@ -114,6 +121,8 @@ def _normalize_label(value: Any) -> str:
         return "ORANGE"
     if token in green_tokens:
         return "GREEN"
+    if token in no_inspection_tokens:
+        return "GEEN_KEURING"
     return ""
 
 
@@ -192,15 +201,27 @@ _RED_PATTERNS = [
     r"niet\s+gevonden",
     r"niet\s+worden\s+gecontroleerd",
     r"niet\s+gecontroleerd",
+    r"geen\s+keuring\s+uitgevoerd",
+    r"nog\s+niets\s+om\s+te\s+keuren",
+    r"niet\s+toegankelijk",
+    r"bord\s+leeg",
+    r"geen\s+bord\s+gevonden",
+    r"kon\s+niet\s+uitgevoerd\s+worden",
+    r"geen\s+ingevulde\s+gegevens",
     r"geen\s+besluit\s+genomen",
     r"geen\s+controle\s+uitgevoerd",
     r"geen\s+controle\s+mogelijk",
     r"controle\s+niet\s+mogelijk",
     r"niet\s+bereikbaar",
+    r"geen\s+kast\s+aanwezig",
     # Encoded variants seen in some PDFs:
     # "NIET WORDEN GECONTROLEERD" and "kon niet worden gecontroleerd"
     r"OJFU[\x00-\x1f\s]*XPSEFO[\x00-\x1f\s]*HFDPOUSPMFFSE",
     r"\]WRc[\x00-\x1f\s]*f\^aQR\][\x00-\x1f\s]*URP\^\]ca\^ZRRaQ",
+]
+
+_ORANGE_OVERRIDE_PATTERNS = [
+    r"cabine\s+is\s+reeds\s+afgebroken",
 ]
 
 # Patterns for the "voldoet aan" base (compliance confirmed).
@@ -240,6 +261,19 @@ _ENCODED_OPMERKINGEN_PATTERN = r"0QNFSLJOHFO|PQNFSLJOHFO"
 _ENCODED_OPMERKINGEN_NIHIL_PATTERN = (
     r"(?:0QNFSLJOHFO|PQNFSLJOHFO)[\x00-\x1f\s:;,\-]*(?:@WVWZ|OJIJM)"
 )
+
+_NO_INSPECTION_PATTERNS = [
+    r"\bsynthesedocument\b",
+    r"bijstand\s+in\s+het\s+kader\s+van\s+de\s+risicoanalyse",
+    r"\bsamenvatting\s+zonder\s+conclusie\b",
+    r"documentatie\s+arei",
+]
+
+
+def _has_any_pattern(normalized_text: str, patterns: list[str]) -> bool:
+    if not normalized_text:
+        return False
+    return any(re.search(pat, normalized_text, flags=re.IGNORECASE) for pat in patterns)
 
 
 def _has_remarks_marker(normalized_text: str) -> bool:
@@ -297,6 +331,19 @@ def _extract_pre_besluit_section(full_text: str) -> str:
     return full_text[: match.start()]
 
 
+def _is_no_inspection_document(normalized_full: str) -> bool:
+    if not normalized_full:
+        return False
+    return any(re.search(pat, normalized_full, flags=re.IGNORECASE) for pat in _NO_INSPECTION_PATTERNS)
+
+
+def _hash_pdf_text(pdf_text: str) -> str:
+    normalized = _normalize_text(pdf_text).casefold()
+    if not normalized:
+        return ""
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
 def _classify_besluit_text(section_text: str, full_text: str) -> DecisionExtraction:
     """Classify the BESLUIT section into RED / ORANGE / GREEN / UNKNOWN.
 
@@ -312,11 +359,32 @@ def _classify_besluit_text(section_text: str, full_text: str) -> DecisionExtract
     normalized = _normalize_text(target).lower()
     normalized_full = _normalize_text(full_text).lower()
 
+    if _is_no_inspection_document(normalized_full):
+        return DecisionExtraction(
+            verdict="GEEN_KEURING",
+            confidence="HIGH",
+            reason="Documenttype zonder keuringsbesluit (samenvatting/documentatie)",
+            section_excerpt=_normalize_text(target)[:400],
+        )
+
+    if _has_any_pattern(normalized, [r"geen\s+keuring\s+uitgevoerd"]) or _has_any_pattern(
+        normalized_full, [r"geen\s+keuring\s+uitgevoerd"]
+    ):
+        if (_has_remarks_marker(normalized) and not _has_no_remarks_marker(normalized)) or (
+            _has_remarks_marker(normalized_full) and not _has_no_remarks_marker(normalized_full)
+        ):
+            return DecisionExtraction(
+                verdict="ORANGE",
+                confidence="HIGH",
+                reason="Geen keuring uitgevoerd, maar wel opmerkingen aanwezig",
+                section_excerpt=_normalize_text(target)[:400],
+            )
+
     if not normalized:
         return DecisionExtraction(
-            verdict="UNKNOWN",
+            verdict="GEEN_KEURING",
             confidence="LOW",
-            reason="Geen leesbare tekst in PDF",
+            reason="Geen leesbare tekst in PDF (waarschijnlijk geen keuringsverslag)",
             section_excerpt="",
         )
 
@@ -374,6 +442,16 @@ def _classify_besluit_text(section_text: str, full_text: str) -> DecisionExtract
             reason="Checkbox template: INBREUKEN bevat inbreuken (geen Nihil)",
             section_excerpt=excerpt,
         )
+
+    # Step 2 – Explicit ORANGE overrides found in remarks sections.
+    for pat in _ORANGE_OVERRIDE_PATTERNS:
+        if re.search(pat, normalized, flags=re.IGNORECASE) or re.search(pat, normalized_full, flags=re.IGNORECASE):
+            return DecisionExtraction(
+                verdict="ORANGE",
+                confidence="MEDIUM",
+                reason=f"Conform met opmerkingen op basis van /{pat}/",
+                section_excerpt=excerpt,
+            )
 
     # Step 2 – GREEN base present?
     green_pat_hit = None
@@ -550,6 +628,8 @@ def verify_enriched_labels(
         "date_filtered_out": 0,
         "pdf_missing": 0,
         "unreadable": 0,
+        "no_inspection": 0,
+        "content_duplicates": 0,
         "matched": 0,
         "mismatch": 0,
         "unknown": 0,
@@ -577,6 +657,7 @@ def verify_enriched_labels(
                 "match": stats["matched"],
                 "mismatch": stats["mismatch"],
                 "pdf_missing": stats["pdf_missing"],
+                "geen_keuring": stats["no_inspection"],
                 "unknown": stats["unknown"],
             },
             refresh=False,
@@ -619,11 +700,14 @@ def verify_enriched_labels(
             full_text = _extract_pdf_text(pdf_path)
             besluit_text = _extract_besluit_section(full_text)
             extraction = _classify_besluit_text(besluit_text, full_text)
+            pdf_content_hash = _hash_pdf_text(full_text)
         except Exception as exc:
             stats["processed"] += 1
             stats["unreadable"] += 1
+            stats["no_inspection"] += 1
             _update_progress_postfix()
             pbar.update(1)
+            label_expected_out = expected_label or "GEEN_KEURING"
             result_rows.append(
                 {
                     "row_index": excel_row_index,
@@ -631,19 +715,27 @@ def verify_enriched_labels(
                     "filename": filename,
                     "visit_date": visit_ts.date().isoformat(),
                     "label_raw": expected_label_raw,
-                    "label_expected": expected_label or "UNKNOWN",
-                    "label_from_pdf": "UNKNOWN",
-                    "verify_status": "PDF_UNREADABLE",
+                    "label_expected": label_expected_out,
+                    "label_from_pdf": "GEEN_KEURING",
+                    "verify_status": "GEEN_KEURING",
                     "confidence": "LOW",
-                    "reason": f"PDF lezen mislukt: {exc}",
+                    "reason": f"PDF lezen mislukt (behandeld als geen keuringsverslag): {exc}",
                     "pdf_path": str(pdf_path),
+                    "pdf_content_hash": "",
+                    "content_duplicate": False,
+                    "content_duplicate_count": 0,
+                    "duplicate_filenames": "",
                     "besluit_excerpt": "",
                 }
             )
             continue
 
         predicted = extraction.verdict
-        if not expected_label or predicted == "UNKNOWN":
+        label_expected_out = expected_label or ("GEEN_KEURING" if predicted == "GEEN_KEURING" else "UNKNOWN")
+        if predicted == "GEEN_KEURING":
+            verify_status = "GEEN_KEURING"
+            stats["no_inspection"] += 1
+        elif not expected_label or predicted == "UNKNOWN":
             verify_status = "UNKNOWN"
             stats["unknown"] += 1
         elif expected_label == predicted:
@@ -663,17 +755,46 @@ def verify_enriched_labels(
                 "filename": filename,
                 "visit_date": visit_ts.date().isoformat(),
                 "label_raw": expected_label_raw,
-                "label_expected": expected_label or "UNKNOWN",
+                "label_expected": label_expected_out,
                 "label_from_pdf": predicted,
                 "verify_status": verify_status,
                 "confidence": extraction.confidence,
                 "reason": extraction.reason,
                 "pdf_path": str(pdf_path),
+                "pdf_content_hash": pdf_content_hash,
+                "content_duplicate": False,
+                "content_duplicate_count": 0,
+                "duplicate_filenames": "",
                 "besluit_excerpt": extraction.section_excerpt,
             }
         )
 
     pbar.close()
+
+    content_groups: dict[str, list[int]] = {}
+    for idx, row in enumerate(result_rows):
+        content_hash = str(row.get("pdf_content_hash", "") or "")
+        if content_hash:
+            content_groups.setdefault(content_hash, []).append(idx)
+
+    for indices in content_groups.values():
+        if len(indices) <= 1:
+            continue
+        stats["content_duplicates"] += len(indices)
+        full_names = []
+        for idx in indices:
+            site_id = str(result_rows[idx].get("site_id", "") or "")
+            filename = str(result_rows[idx].get("filename", "") or "")
+            full_names.append(f"{site_id}/{filename}" if site_id else filename)
+        for idx in indices:
+            row = result_rows[idx]
+            current_site = str(row.get("site_id", "") or "")
+            current_name = str(row.get("filename", "") or "")
+            current_full = f"{current_site}/{current_name}" if current_site else current_name
+            duplicates = [name for name in full_names if name != current_full]
+            row["content_duplicate"] = True
+            row["content_duplicate_count"] = len(indices)
+            row["duplicate_filenames"] = "; ".join(sorted(dict.fromkeys(duplicates)))
 
     result_rows.sort(key=lambda x: x.get("row_index", 0))
 
