@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import hashlib
 import importlib
 import logging
@@ -27,6 +28,14 @@ class DecisionExtraction:
     confidence: str
     reason: str
     section_excerpt: str
+
+
+@dataclass(frozen=True)
+class InspectionDateExtraction:
+    inspection_date: dt.date | None
+    fallback_date: dt.date | None
+    confidence: str
+    reason: str
 
 
 def _normalize_text(value: Any) -> str:
@@ -344,6 +353,168 @@ def _hash_pdf_text(pdf_text: str) -> str:
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
+_DATE_TOKEN_RE = r"(\d{1,2})\s*/\s*(\d{1,2})\s*/\s*((?:19|20)\d{2}|\d{2,3})"
+_DATE_TOKEN_NAMED_RE = r"(?P<day>\d{1,2})\s*/\s*(?P<month>\d{1,2})\s*/\s*(?P<year>(?:19|20)\d{2}|\d{2,3})"
+_DATE_TOKEN_COMPILED = re.compile(_DATE_TOKEN_NAMED_RE)
+_DATE_RANGE_SEP_RE = r"(?:tot|to)"
+_NOISE_DATE_LINE_RE = re.compile(r"(?i)uitgiftedatum|koninklijk\s+besluit\s+van")
+
+
+def _infer_year_from_truncated_token(
+    year_token: str,
+    *,
+    visit_date: dt.date | None,
+    day: int,
+    month: int,
+) -> int | None:
+    if len(year_token) == 4:
+        return int(year_token)
+
+    if len(year_token) == 2:
+        base = 2000 + int(year_token)
+        if visit_date and visit_date.day == day and visit_date.month == month and abs(visit_date.year - base) <= 1:
+            return visit_date.year
+        return base
+
+    if len(year_token) != 3:
+        return None
+
+    if visit_date and visit_date.day == day and visit_date.month == month:
+        return visit_date.year
+
+    candidates: set[int] = set()
+    for pos in range(4):
+        for digit in "0123456789":
+            built = f"{year_token[:pos]}{digit}{year_token[pos:]}"
+            if len(built) != 4:
+                continue
+            year_int = int(built)
+            if 1900 <= year_int <= 2099:
+                candidates.add(year_int)
+
+    if not candidates:
+        return None
+    if visit_date:
+        return min(candidates, key=lambda y: (abs(y - visit_date.year), abs(y - 2000)))
+    return min(candidates, key=lambda y: abs(y - 2000))
+
+
+def _parse_dayfirst_date_token(
+    token: str,
+    *,
+    visit_date: dt.date | None,
+) -> dt.date | None:
+    m = re.search(_DATE_TOKEN_RE, token)
+    if not m:
+        return None
+
+    day = int(m.group(1))
+    month = int(m.group(2))
+    year_token = m.group(3)
+    year = _infer_year_from_truncated_token(year_token, visit_date=visit_date, day=day, month=month)
+    if year is None:
+        return None
+
+    try:
+        return dt.date(year, month, day)
+    except ValueError:
+        return None
+
+
+def _extract_inspection_date(pdf_text: str, *, visit_date: dt.date | None) -> InspectionDateExtraction:
+    if not pdf_text or not pdf_text.strip():
+        return InspectionDateExtraction(
+            inspection_date=None,
+            fallback_date=None,
+            confidence="LOW",
+            reason="Geen leesbare tekst voor datumextractie",
+        )
+
+    patterns: list[tuple[str, str, str]] = [
+        (
+            r"(?is)interventiegegevens[\s\S]{0,420}?\bdatum\b\s*[:\-]?\s*(?:van|vanaf)?\s*"
+            + _DATE_TOKEN_RE
+            + r"\s*"
+            + _DATE_RANGE_SEP_RE
+            + r"\s*"
+            + _DATE_TOKEN_RE,
+            "Interventiegegevens range-datum gevonden",
+            "HIGH",
+        ),
+        (
+            r"(?is)\buitgevoerd\s+op\b\s*[:\-]?\s*(?:vanaf\s*)?"
+            + _DATE_TOKEN_RE
+            + r"(?:\s*\d{1,2}:\d{2})?(?:\s*[\-–]\s*\d{1,2}:\d{2})?\s*"
+            + _DATE_RANGE_SEP_RE
+            + r"\s*"
+            + _DATE_TOKEN_RE,
+            "Uitgevoerd op range-datum gevonden",
+            "HIGH",
+        ),
+        (
+            r"(?is)interventiegegevens[\s\S]{0,420}?\bdatum\b\s*[:\-]?\s*(?:van|vanaf)?\s*"
+            + _DATE_TOKEN_RE,
+            "Interventiegegevens datum gevonden",
+            "HIGH",
+        ),
+        (
+            r"(?is)\buitgevoerd\s+op\b\s*[:\-]?\s*(?:vanaf\s*)?" + _DATE_TOKEN_RE,
+            "Uitgevoerd op datum gevonden",
+            "HIGH",
+        ),
+    ]
+
+    for pattern, reason, confidence in patterns:
+        m = re.search(pattern, pdf_text, flags=re.IGNORECASE)
+        if not m:
+            continue
+
+        groups = m.groups()
+        # First date groups are always indexes 0..2, optional second date 3..5.
+        primary_token = "/".join([groups[0], groups[1], groups[2]])
+        primary_date = _parse_dayfirst_date_token(primary_token, visit_date=visit_date)
+        fallback_date = None
+        if len(groups) >= 6:
+            fallback_token = "/".join([groups[3], groups[4], groups[5]])
+            fallback_date = _parse_dayfirst_date_token(fallback_token, visit_date=visit_date)
+
+        if primary_date:
+            return InspectionDateExtraction(primary_date, fallback_date, confidence, reason)
+        if fallback_date:
+            return InspectionDateExtraction(
+                fallback_date,
+                None,
+                "MEDIUM",
+                reason + " (fallback op einddatum)",
+            )
+
+    besluit_text = _extract_besluit_section(pdf_text)
+    if besluit_text:
+        m_besluit = re.search(r"(?is)\bdatum\b\s*[:\-]?\s*" + _DATE_TOKEN_RE, besluit_text, flags=re.IGNORECASE)
+        if m_besluit:
+            token = "/".join([m_besluit.group(1), m_besluit.group(2), m_besluit.group(3)])
+            parsed = _parse_dayfirst_date_token(token, visit_date=visit_date)
+            if parsed:
+                return InspectionDateExtraction(parsed, None, "HIGH", "Datum gevonden in BESLUIT-sectie")
+
+    filtered_lines = [line for line in pdf_text.splitlines() if not _NOISE_DATE_LINE_RE.search(line)]
+    filtered_text = "\n".join(filtered_lines)
+    date_hits = []
+    for m in _DATE_TOKEN_COMPILED.finditer(filtered_text):
+        token = f"{m.group('day')}/{m.group('month')}/{m.group('year')}"
+        parsed = _parse_dayfirst_date_token(token, visit_date=visit_date)
+        if parsed is not None:
+            date_hits.append(parsed)
+
+    unique_hits = sorted(set(date_hits))
+    if len(unique_hits) == 1:
+        return InspectionDateExtraction(unique_hits[0], None, "MEDIUM", "Unieke datum in document")
+    if len(unique_hits) > 1:
+        return InspectionDateExtraction(None, None, "LOW", "Meerdere datums in document, geen eenduidige inspectiedatum")
+
+    return InspectionDateExtraction(None, None, "LOW", "Geen datum gevonden in PDF")
+
+
 def _classify_besluit_text(section_text: str, full_text: str) -> DecisionExtraction:
     """Classify the BESLUIT section into RED / ORANGE / GREEN / UNKNOWN.
 
@@ -610,6 +781,7 @@ def verify_enriched_labels(
     input_excel: Path,
     output_excel: Path,
     since_date: str,
+    skip_rows: int = 0,
     limit_rows: int | None = None,
 ) -> dict[str, int]:
     df = pd.read_excel(input_excel)
@@ -633,12 +805,17 @@ def verify_enriched_labels(
         "matched": 0,
         "mismatch": 0,
         "unknown": 0,
+        "date_matched": 0,
+        "date_mismatch": 0,
+        "date_unknown": 0,
     }
 
     base_dir = input_excel.parent
 
     valid_visit_mask = visit_dates.notna() & (visit_dates > since_ts)
     eligible_positions = [int(pos) for pos in valid_visit_mask[valid_visit_mask].index]
+    if skip_rows and skip_rows > 0:
+        eligible_positions = eligible_positions[skip_rows:]
     if limit_rows is not None and limit_rows > 0:
         eligible_positions = eligible_positions[:limit_rows]
     stats["date_filtered_out"] = int((~valid_visit_mask).sum())
@@ -659,6 +836,7 @@ def verify_enriched_labels(
                 "pdf_missing": stats["pdf_missing"],
                 "geen_keuring": stats["no_inspection"],
                 "unknown": stats["unknown"],
+                "date_mismatch": stats["date_mismatch"],
             },
             refresh=False,
         )
@@ -700,6 +878,7 @@ def verify_enriched_labels(
             full_text = _extract_pdf_text(pdf_path)
             besluit_text = _extract_besluit_section(full_text)
             extraction = _classify_besluit_text(besluit_text, full_text)
+            date_extraction = _extract_inspection_date(full_text, visit_date=visit_ts.date() if pd.notna(visit_ts) else None)
             pdf_content_hash = _hash_pdf_text(full_text)
         except Exception as exc:
             stats["processed"] += 1
@@ -726,9 +905,29 @@ def verify_enriched_labels(
                     "content_duplicate_count": 0,
                     "duplicate_filenames": "",
                     "besluit_excerpt": "",
+                    "inspection_date_pdf": "",
+                    "inspection_date_pdf_fallback": "",
+                    "date_verify_status": "UNKNOWN",
+                    "date_confidence": "LOW",
+                    "date_reason": "Datumextractie overgeslagen door leesfout",
+                    "overall_verify_status": "UNKNOWN",
                 }
             )
             continue
+
+        visit_date_obj = visit_ts.date() if pd.notna(visit_ts) else None
+        pdf_date = date_extraction.inspection_date
+        pdf_date_fallback = date_extraction.fallback_date
+
+        if visit_date_obj is None or pdf_date is None:
+            date_verify_status = "UNKNOWN"
+            stats["date_unknown"] += 1
+        elif pdf_date == visit_date_obj or (pdf_date_fallback is not None and pdf_date_fallback == visit_date_obj):
+            date_verify_status = "MATCH"
+            stats["date_matched"] += 1
+        else:
+            date_verify_status = "MISMATCH"
+            stats["date_mismatch"] += 1
 
         predicted = extraction.verdict
         label_expected_out = expected_label or ("GEEN_KEURING" if predicted == "GEEN_KEURING" else "UNKNOWN")
@@ -748,6 +947,18 @@ def verify_enriched_labels(
         stats["processed"] += 1
         _update_progress_postfix()
         pbar.update(1)
+
+        if verify_status in {"PDF_MISSING", "UNKNOWN"}:
+            overall_verify_status = "UNKNOWN"
+        elif verify_status == "GEEN_KEURING":
+            overall_verify_status = "GEEN_KEURING"
+        elif verify_status == "MISMATCH" or date_verify_status == "MISMATCH":
+            overall_verify_status = "MISMATCH"
+        elif verify_status == "MATCH" and date_verify_status == "MATCH":
+            overall_verify_status = "MATCH"
+        else:
+            overall_verify_status = "UNKNOWN"
+
         result_rows.append(
             {
                 "row_index": excel_row_index,
@@ -766,6 +977,12 @@ def verify_enriched_labels(
                 "content_duplicate_count": 0,
                 "duplicate_filenames": "",
                 "besluit_excerpt": extraction.section_excerpt,
+                "inspection_date_pdf": pdf_date.isoformat() if pdf_date else "",
+                "inspection_date_pdf_fallback": pdf_date_fallback.isoformat() if pdf_date_fallback else "",
+                "date_verify_status": date_verify_status,
+                "date_confidence": date_extraction.confidence,
+                "date_reason": date_extraction.reason,
+                "overall_verify_status": overall_verify_status,
             }
         )
 
@@ -849,6 +1066,12 @@ def parse_args() -> argparse.Namespace:
         help="Verwerk enkel records met Visit date > deze datum (YYYY-MM-DD)",
     )
     parser.add_argument(
+        "--skip",
+        type=int,
+        default=0,
+        help="Optioneel: sla de eerste N in-scope records over (na datumfilter).",
+    )
+    parser.add_argument(
         "--limit",
         type=int,
         default=None,
@@ -883,6 +1106,7 @@ def main() -> int:
             input_excel=input_excel,
             output_excel=output_excel,
             since_date=args.since_date,
+            skip_rows=args.skip,
             limit_rows=args.limit,
         )
     except Exception as exc:
