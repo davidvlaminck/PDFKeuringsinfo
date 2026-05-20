@@ -1,3 +1,10 @@
+"""
+Verify PDF document contents: inspection result (RED/ORANGE/GREEN/GEEN_KEURING) and inspection date.
+
+This module extracts and classifies the compliance verdict from PDF inspection documents
+(BESLUIT section) and performs date extraction from various document sections.
+Reports on label mismatches, date mismatches, and content duplicates.
+"""
 from __future__ import annotations
 
 import argparse
@@ -16,7 +23,7 @@ from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_SINCE_DATE = "2021-01-01"
+DEFAULT_SINCE_DATE = "1900-01-01"
 DEFAULT_INPUT_DIR = Path("/home/davidlinux/Documenten/AWV/Keuringen")
 DEFAULT_INPUT_FILENAME = "MyVinotte Min.Vl.Gemeenschap Reports list.enriched.xlsx"
 DEFAULT_INPUT_PATH = DEFAULT_INPUT_DIR / DEFAULT_INPUT_FILENAME
@@ -24,6 +31,7 @@ DEFAULT_INPUT_PATH = DEFAULT_INPUT_DIR / DEFAULT_INPUT_FILENAME
 
 @dataclass(frozen=True)
 class DecisionExtraction:
+    """Classified compliance verdict from BESLUIT section."""
     verdict: str
     confidence: str
     reason: str
@@ -32,6 +40,7 @@ class DecisionExtraction:
 
 @dataclass(frozen=True)
 class InspectionDateExtraction:
+    """Extracted inspection date from PDF document."""
     inspection_date: dt.date | None
     fallback_date: dt.date | None
     confidence: str
@@ -39,6 +48,7 @@ class InspectionDateExtraction:
 
 
 def _normalize_text(value: Any) -> str:
+    """Normalize text value: trim, deduplicate whitespace."""
     if value is None:
         return ""
     text = str(value).strip()
@@ -84,6 +94,7 @@ def _find_first_illegal_xml_value(df: pd.DataFrame) -> tuple[int, str, str] | No
 
 
 def _normalize_site_id(value: Any) -> str:
+    """Normalize site ID: trim, remove .0 suffix if numeric."""
     text = _normalize_text(value)
     if text.endswith(".0") and text.replace(".", "", 1).isdigit():
         return text[:-2]
@@ -91,6 +102,7 @@ def _normalize_site_id(value: Any) -> str:
 
 
 def _normalize_label(value: Any) -> str:
+    """Normalize label to standard form: RED, ORANGE, GREEN, or GEEN_KEURING."""
     token = _normalize_text(value).upper().replace(" ", "")
     if not token:
         return ""
@@ -136,6 +148,7 @@ def _normalize_label(value: Any) -> str:
 
 
 def _extract_pdf_text(pdf_path: Path) -> str:
+    """Extract all text from PDF file, concatenating pages."""
     PdfReader = _get_pdf_reader()
     reader = PdfReader(str(pdf_path))
     parts: list[str] = []
@@ -149,6 +162,7 @@ def _extract_pdf_text(pdf_path: Path) -> str:
 
 @lru_cache(maxsize=1)
 def _get_pdf_reader():
+    """Dynamically import pypdf.PdfReader. Cached to avoid repeated imports."""
     try:
         pdf_module = importlib.import_module("pypdf")
         return getattr(pdf_module, "PdfReader")
@@ -192,7 +206,7 @@ def _extract_besluit_section(pdf_text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Classification
+# Classification Patterns
 #
 # Evaluation order:
 #   1. RED   – "voldoet niet aan" / "niet in overeenstemming"
@@ -280,12 +294,14 @@ _NO_INSPECTION_PATTERNS = [
 
 
 def _has_any_pattern(normalized_text: str, patterns: list[str]) -> bool:
+    """Check if any pattern matches the text."""
     if not normalized_text:
         return False
     return any(re.search(pat, normalized_text, flags=re.IGNORECASE) for pat in patterns)
 
 
 def _has_remarks_marker(normalized_text: str) -> bool:
+    """Check if text contains remark/recommendation markers."""
     if not normalized_text:
         return False
     for pat in _REMARK_PATTERNS:
@@ -295,6 +311,7 @@ def _has_remarks_marker(normalized_text: str) -> bool:
 
 
 def _has_no_remarks_marker(normalized_text: str) -> bool:
+    """Check if text explicitly states no remarks (nihil)."""
     if not normalized_text:
         return False
     for pat in _NO_REMARKS_PATTERNS:
@@ -341,12 +358,14 @@ def _extract_pre_besluit_section(full_text: str) -> str:
 
 
 def _is_no_inspection_document(normalized_full: str) -> bool:
+    """Check if document is a summary/documentation without actual inspection result."""
     if not normalized_full:
         return False
     return any(re.search(pat, normalized_full, flags=re.IGNORECASE) for pat in _NO_INSPECTION_PATTERNS)
 
 
 def _hash_pdf_text(pdf_text: str) -> str:
+    """Compute SHA256 hash of normalized PDF text for duplicate detection."""
     normalized = _normalize_text(pdf_text).casefold()
     if not normalized:
         return ""
@@ -367,6 +386,7 @@ def _infer_year_from_truncated_token(
     day: int,
     month: int,
 ) -> int | None:
+    """Infer 4-digit year from token (may be 2, 3, or 4 digits) using visit_date as hint."""
     if len(year_token) == 4:
         return int(year_token)
 
@@ -404,6 +424,7 @@ def _parse_dayfirst_date_token(
     *,
     visit_date: dt.date | None,
 ) -> dt.date | None:
+    """Parse date token in DD/MM/YYYY format (possibly truncated year)."""
     m = re.search(_DATE_TOKEN_RE, token)
     if not m:
         return None
@@ -422,6 +443,14 @@ def _parse_dayfirst_date_token(
 
 
 def _extract_inspection_date(pdf_text: str, *, visit_date: dt.date | None) -> InspectionDateExtraction:
+    """Extract inspection date from PDF document.
+
+    Tries multiple patterns:
+    1. Interventiegegevens section (date range or single date)
+    2. Uitgevoerd op section
+    3. BESLUIT section (single date)
+    4. Fallback: all dates in document (if unique)
+    """
     if not pdf_text or not pdf_text.strip():
         return InspectionDateExtraction(
             inspection_date=None,
@@ -584,7 +613,7 @@ def _classify_besluit_text(section_text: str, full_text: str) -> DecisionExtract
                 section_excerpt=excerpt,
             )
 
-    # Step 1b – Checkbox template: determine verdicht via the INBREUKEN section.
+    # Step 1b – Checkbox template: determine verdict via the INBREUKEN section.
     if is_checkbox_template:
         pre_besluit = _normalize_text(_extract_pre_besluit_section(full_text)).lower()
         # Heuristic: "Nihil" directly under the INBREUKEN/OPMERKINGEN heading means no infractions.
@@ -723,6 +752,7 @@ def _find_pdf_path(
     filename: str,
     site_file_index: dict[str, dict[str, Path]] | None = None,
 ) -> Path | None:
+    """Find PDF file in site directory, with case-insensitive and .pdf extension fallback."""
     if not site_id or not filename:
         return None
 
@@ -752,6 +782,7 @@ def _find_pdf_path(
 
 
 def _build_site_file_index(base_dir: Path, site_ids: set[str]) -> dict[str, dict[str, Path]]:
+    """Pre-build lowercase filename index per site directory for efficient lookup."""
     index: dict[str, dict[str, Path]] = {}
     for site_id in site_ids:
         if not site_id:
@@ -764,6 +795,7 @@ def _build_site_file_index(base_dir: Path, site_ids: set[str]) -> dict[str, dict
 
 
 def _resolve_column(df: pd.DataFrame, candidates: list[str], fallback_index: int | None = None) -> str:
+    """Resolve DataFrame column by name (case-insensitive), with optional fallback by index."""
     normalized = {str(col).strip().lower(): col for col in df.columns}
     for candidate in candidates:
         match = normalized.get(candidate.strip().lower())
@@ -776,7 +808,7 @@ def _resolve_column(df: pd.DataFrame, candidates: list[str], fallback_index: int
     raise ValueError(f"Kolom niet gevonden. Gezochte headers: {candidates}")
 
 
-def verify_enriched_labels(
+def verify_pdf_contents_and_date(
     *,
     input_excel: Path,
     output_excel: Path,
@@ -784,6 +816,17 @@ def verify_enriched_labels(
     skip_rows: int = 0,
     limit_rows: int | None = None,
 ) -> dict[str, int]:
+    """Verify PDF inspection result (verdict) and date against enriched Excel.
+
+    For each row in the input Excel:
+    1. Extract decision/verdict from PDF BESLUIT section
+    2. Extract inspection date from PDF document
+    3. Compare verdict to enriched label
+    4. Compare date to enriched visit date
+    5. Report mismatches and content duplicates
+
+    Returns statistics dictionary.
+    """
     df = pd.read_excel(input_excel)
 
     site_col = _resolve_column(df, ["Site ID", "SiteID"], fallback_index=0)
@@ -820,7 +863,7 @@ def verify_enriched_labels(
         eligible_positions = eligible_positions[:limit_rows]
     stats["date_filtered_out"] = int((~valid_visit_mask).sum())
 
-    pbar = tqdm(total=len(eligible_positions), desc="PDF-label verificatie", unit="rij")
+    pbar = tqdm(total=len(eligible_positions), desc="PDF-inhoud en datum verificatie", unit="rij")
     site_ids = {
         _normalize_site_id(df.iloc[pos].get(site_col))
         for pos in eligible_positions
@@ -1043,9 +1086,12 @@ def verify_enriched_labels(
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
         description=(
-            "Verifieer Label in enriched Excel tegen besluittekst in PDF's onder de KEuringen-map."
+            "Verifieer PDF-inhoud (inspectieresultaat + datum) tegen enriched Excel. "
+            "Vergelijkt de verdict uit het BESLUIT-gedeelte en de inspectiedatum uit het PDF "
+            "met de waarden in de enriched Excel."
         )
     )
     parser.add_argument(
@@ -1058,7 +1104,7 @@ def parse_args() -> argparse.Namespace:
         "--output",
         type=Path,
         default=None,
-        help="Pad naar outputrapport (.xlsx). Default: <input>.pdf-label-check.xlsx",
+        help="Pad naar outputrapport (.xlsx). Default: <input>.pdf-contents-check.xlsx",
     )
     parser.add_argument(
         "--since-date",
@@ -1081,6 +1127,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    """Main entry point."""
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)-8s %(message)s",
@@ -1099,10 +1146,10 @@ def main() -> int:
             logger.error("Inputbestand bestaat niet: %s", input_excel)
             return 1
 
-    output_excel = args.output.resolve() if args.output else input_excel.with_name(f"{input_excel.stem}.pdf-label-check.xlsx")
+    output_excel = args.output.resolve() if args.output else input_excel.with_name(f"{input_excel.stem}.pdf-contents-check.xlsx")
 
     try:
-        stats = verify_enriched_labels(
+        stats = verify_pdf_contents_and_date(
             input_excel=input_excel,
             output_excel=output_excel,
             since_date=args.since_date,

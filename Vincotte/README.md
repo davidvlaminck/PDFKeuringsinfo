@@ -184,6 +184,19 @@ Extra beslissingsregel in PDF-parser:
   `GEEN_KEURING` geclassificeerd.
 - In gecodeerde PDF-varianten geldt: `Vastgestelde inbreuken` zonder `Nihil` wordt als
   `Red` geïnterpreteerd.
+
+Datumverificatie:
+
+- De parser zoekt een inspectiedatum in de PDF (o.a. `datum van controle`, `keuringsdatum`,
+  `inspectiedatum`, `... uitgevoerd op ...`).
+- Gevonden inspectiedatum wordt vergeleken met `Visit date` uit Excel.
+- Uitkomst per rij staat in `date_verify_status` (`MATCH`, `MISMATCH`, `UNKNOWN`).
+- Voor oude expliciete datumvelden met twee-cijferig jaar (`DD/MM/YY`) wordt het jaar
+  indien nodig bijgestuurd naar het jaar van `Visit date` wanneer dag/maand gelijk zijn en
+  het verschil precies 1 jaar is.
+- Als meerdere verschillende datums in de PDF staan zonder duidelijke inspectiedatum,
+  wordt de status `UNKNOWN` met reden in `date_reason`.
+- `overall_verify_status` combineert labelcontrole + datumcontrole in 1 veld.
 - **Checkbox-template** (HS-verslagvorm): sommige documenten tonen in het BESLUIT altijd
   beide opties (`VOLDOET AAN` én `VOLDOET NIET AAN`) als aanvinkvakjes.  Omdat tekst-
   extractie niet ziet welk vakje aangevinkt is, wordt de aanwezigheid van `VOLDOET NIET AAN`
@@ -220,3 +233,73 @@ Output:
 - CSV met dezelfde resultaten (zelfde bestandsnaam, extensie `.csv`)
 - Extra kolommen voor inhoudelijke duplicaten: `pdf_content_hash`, `content_duplicate`,
   `content_duplicate_count` en `duplicate_filenames`.
+- Extra datumkolommen: `inspection_date_pdf`, `date_verify_status`, `date_confidence`, `date_reason`.
+- Gecombineerde statuskolom: `overall_verify_status`.
+
+## Inbreuken extractie (RED-labels)
+
+Gebruik `extract_red_infractions.py` om per **asset** enkel de **meest recente** keuring te nemen, daaruit de inbreuken uit de PDF te extraheren, en een provinciale draaitabel te maken.
+
+Wat het script doet:
+
+- filter op `Visit Date > --since-date` (standaard `2021-01-01`)
+- houdt per asset alleen de meest recente keuring (`Arango UUID` als primaire assetsleutel)
+- neemt enkel records met label `Red`/`Rood`
+- extraheert inbreuken uit de sectie `III. INBREUKEN`
+- mapt codes naar families met `AREI Codes_ F-codes ...xlsx`
+- schrijft 3 outputs:
+  - `<prefix>.infractions-detail.(csv|xlsx)`
+  - `<prefix>.infractions-per-asset.(csv|xlsx)`
+  - `<prefix>.infractions-pivot-province.(csv|xlsx)`
+
+Run:
+
+```bash
+cd /home/davidlinux/PycharmProjects/PDFKeuringsinfo
+uv run python Vincotte/extract_red_infractions.py \
+  --input "/home/davidlinux/Documenten/AWV/Keuringen/MyVinotte Min.Vl.Gemeenschap Reports list.enriched.xlsx"
+```
+
+Optioneel:
+
+```bash
+cd /home/davidlinux/PycharmProjects/PDFKeuringsinfo
+uv run python Vincotte/extract_red_infractions.py \
+  --input "/home/davidlinux/Documenten/AWV/Keuringen/MyVinotte Min.Vl.Gemeenschap Reports list.enriched.xlsx" \
+  --output-prefix "/home/davidlinux/Documenten/AWV/Keuringen/MyVinotte Min.Vl.Gemeenschap Reports list.enriched.red-infractions" \
+  --arei-codes "/home/davidlinux/PycharmProjects/PDFKeuringsinfo/Vincotte/AREI Codes_ F-codes en Vinçotte Gebruik (1).xlsx" \
+  --since-date 2021-01-01
+```
+
+> Opmerking: provincie wordt afgeleid op basis van postcode in `City`, met fallback op provincie-tekst in `Description`. Niet-herkende gevallen krijgen `UNKNOWN`.
+
+## Analyse van UNMAPPED inbreuken
+
+Gebruik `analyze_unmapped_infractions.py` op het gegenereerde detailbestand om alle niet-gemapte inbreuken te groeperen en per variant gelijkaardige **wel** gemapte stukken te tonen.
+
+Outputs:
+
+- `<prefix>.infractions-unmapped-summary.(csv|xlsx)`
+  - per unieke `UNMAPPED` code + tekstvariant
+  - met top gelijkaardige gemapte kandidaten
+- `<prefix>.infractions-unmapped-codes.(csv|xlsx)`
+  - samenvatting per rauwe code
+- `<prefix>.infractions-unmapped-rows.(csv|xlsx)`
+  - rij-per-rij `UNMAPPED` detail met voorgestelde match
+
+Run:
+
+```bash
+cd /home/davidlinux/PycharmProjects/PDFKeuringsinfo
+uv run python Vincotte/analyze_unmapped_infractions.py
+```
+
+Optioneel:
+
+```bash
+cd /home/davidlinux/PycharmProjects/PDFKeuringsinfo
+uv run python Vincotte/analyze_unmapped_infractions.py \
+  --detail-csv "/home/davidlinux/Documenten/AWV/Keuringen/MyVinotte Min.Vl.Gemeenschap Reports list.enriched.infractions-detail.csv" \
+  --top-n 5 \
+  --min-score 0.18
+```
