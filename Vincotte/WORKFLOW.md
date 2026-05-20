@@ -13,6 +13,9 @@ uv run python Vincotte/enrich_vincotte_assets.py
 # Step 2: Verify PDF contents (verdict + date)
 uv run python Vincotte/verify_pdf_contents_result_and_date.py
 
+# Step 2b: Merge verification results back into enriched Excel
+uv run python Vincotte/merge_pdf_verification_into_enriched.py
+
 # Step 3: Merge verified infractions (MASTER files) into enriched Excel
 uv run python Vincotte/merge_infractions_to_enriched.py
 ```
@@ -89,15 +92,22 @@ uv run python Vincotte/verify_pdf_contents_result_and_date.py \
   --input "/home/davidlinux/Documenten/AWV/Keuringen/MyVinotte Min.Vl.Gemeenschap Reports list.enriched.xlsx"
 ```
 
-**➡️ TODO: Merge verification results back into enriched.xlsx**
+**Step 2b command (merge-back into enriched.xlsx):**
+```bash
+cd /home/davidlinux/PycharmProjects/PDFKeuringsinfo
+uv run python Vincotte/merge_pdf_verification_into_enriched.py \
+  --enriched "/home/davidlinux/Documenten/AWV/Keuringen/MyVinotte Min.Vl.Gemeenschap Reports list.enriched.xlsx" \
+  --verification "/home/davidlinux/Documenten/AWV/Keuringen/MyVinotte Min.Vl.Gemeenschap Reports list.enriched.pdf-contents-check.xlsx"
 ```
-New columns to add:
-- verified_verdict        (RED/ORANGE/GREEN/GEEN_KEURING from PDF)
-- verdict_match           (Y/N if matches enriched Label)
-- verified_date           (inspection_date from PDF)
-- date_match              (Y/N if matches enriched Visit Date)
-- overall_verify_status   (combined match status)
-```
+
+New columns added to enriched output:
+- `verified_verdict` (RED/ORANGE/GREEN/GEEN_KEURING from PDF)
+- `verdict_match` (`Y`/`N` from `verify_status`)
+- `verified_date` (inspection date from PDF)
+- `verified_date_fallback` (fallback date from PDF range)
+- `date_match` (`Y`/`N` from `date_verify_status`)
+- `overall_verify_status` (combined match status)
+- `verify_status_raw`, `date_verify_status_raw` (original status values)
 
 ---
 
@@ -185,8 +195,8 @@ These are FINAL and immutable. See Step 3 for merging into enriched Excel.
 |------|---------|
 | `enrich_vincotte_assets.py` | Step 1: Add Arango UUIDs |
 | `verify_pdf_contents_result_and_date.py` | Step 2: Verify PDF verdict + date |
-| `extract_red_infractions.py` | Step 3: Extract infraction codes |
-| `analyze_unmapped_infractions.py` | Step 4: Quality analysis |
+| `merge_pdf_verification_into_enriched.py` | Step 2b: Merge verification report back into enriched Excel |
+| `merge_infractions_to_enriched.py` | Step 3: Merge MASTER infraction mappings into enriched Excel |
 | `AREI Codes_ F-codes...xlsx` | Mapping reference (F1-F40 ranges) |
 | `arango_settings.sample.json` | ArangoDB connection template |
 
@@ -310,6 +320,7 @@ After completing all steps, the **final enriched.xlsx** contains:
 - Ready for pivoting by province, asset type, infraction family, etc.
 
 > All enrichment → verification → infraction merging is **cumulative** — each step's output feeds into the next.
+
 
 
 

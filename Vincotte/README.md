@@ -9,7 +9,7 @@
 | Step | Input | Process | Output |
 |------|-------|---------|--------|
 | **1️⃣ ENRICH** | Vincotte Excel + ArangoDB | Match install codes, add asset UUIDs | `enriched.xlsx` |
-| **2️⃣ VERIFY** | `enriched.xlsx` + PDFs | Extract verdict + date, compare to Excel | enriched + `verified_verdict`, `date_match` |
+| **2️⃣ VERIFY + MERGE BACK** | `enriched.xlsx` + PDFs | Extract verdict + date, compare to Excel, merge report back | enriched + `verified_verdict`, `date_match`, `overall_verify_status` |
 | **3️⃣ MERGE INFRACTIONS** | enriched + **MASTER files** | Load verified mappings, pivot F1-F40 counts | enriched + `infractions_F*_count` |
 
 **MASTER Infraction Files** (FINAL, immutable):
@@ -22,6 +22,7 @@
 |------|---------|--------|
 | `enrich_vincotte_assets.py` | Step 1: Add Arango UUIDs | ✅ Active |
 | `verify_pdf_contents_result_and_date.py` | Step 2: PDF validation | ✅ Active |
+| `merge_pdf_verification_into_enriched.py` | Step 2b: Merge verification report into enriched | ✅ Active |
 | `merge_infractions_to_enriched.py` | Step 3: Merge infraction counts | 🚧 TODO: Implement |
 | `AREI Codes_ F-codes...xlsx` | Mapping reference | 📚 Reference |
 | `arango_settings.sample.json` | ArangoDB config | 📚 Template |
