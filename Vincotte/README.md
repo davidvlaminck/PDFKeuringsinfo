@@ -1,14 +1,32 @@
-# Vincotte mapping scaffold
-Deze map bevat de voorbereiding om een Vincotte Excel aan te vullen met asset UUIDs uit ArangoDB.
-## Wat staat er klaar
-- `enrich_vincotte_assets.py`: uitvoerbaar script met `if __name__ == "__main__"`.
-- `arango_settings.sample.json`: voorbeeldconfig voor ArangoDB connectie.
-## Huidige status
+# 📊 Vincotte Data Verification & Enrichment
 
-- Assettype staat op `onderdeel#Laagspanningsbord`.
-- Matching gebeurt nu met strikte regels op `AIMNaamObject_naam` en het eerste deel van `naampad_parts`.
-- Het script overschrijft de bron-Excel nooit; output gaat altijd naar een apart `.enriched.xlsx` bestand.
-- De kolommen `Arango UUID`, `Arango Naam` en `Arango Naampad` worden aangevuld bij unieke match.
+**⚡️ START HERE**: See [**WORKFLOW.md**](WORKFLOW.md) for complete step-by-step instructions.
+
+> **Key info**: Infraction data comes from pre-verified **MASTER files** (not extracted from PDFs), ensuring consistency and allowing corrections before integration.
+
+## 📋 Workflow Summary (3 Steps)
+
+| Step | Input | Process | Output |
+|------|-------|---------|--------|
+| **1️⃣ ENRICH** | Vincotte Excel + ArangoDB | Match install codes, add asset UUIDs | `enriched.xlsx` |
+| **2️⃣ VERIFY** | `enriched.xlsx` + PDFs | Extract verdict + date, compare to Excel | enriched + `verified_verdict`, `date_match` |
+| **3️⃣ MERGE INFRACTIONS** | enriched + **MASTER files** | Load verified mappings, pivot F1-F40 counts | enriched + `infractions_F*_count` |
+
+**MASTER Infraction Files** (FINAL, immutable):
+- `final_corrected_with_review.xlsx` — all mapped infractions
+- `unmapped-ollama-review-template_verwerkt.xlsx` — formerly unmapped, now mapped + verified
+
+## 📁 This Folder
+
+| File | Purpose | Status |
+|------|---------|--------|
+| `enrich_vincotte_assets.py` | Step 1: Add Arango UUIDs | ✅ Active |
+| `verify_pdf_contents_result_and_date.py` | Step 2: PDF validation | ✅ Active |
+| `merge_infractions_to_enriched.py` | Step 3: Merge infraction counts | 🚧 TODO: Implement |
+| `AREI Codes_ F-codes...xlsx` | Mapping reference | 📚 Reference |
+| `arango_settings.sample.json` | ArangoDB config | 📚 Template |
+| ~~`extract_red_infractions.py`~~ | Extract from PDFs (OLD) | ⛔ Replaced by MASTER files |
+| ~~`analyze_unmapped_infractions.py`~~ | Infraction analysis (OLD) | ⛔ Replaced by MASTER files |
 
 ## Aanvullende context
 
