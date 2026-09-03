@@ -60,6 +60,10 @@ def _extract_pdf_text(pdf_path: Path) -> str:
     text = "\n".join(parts)
 
     if text.strip() and not _is_likely_garbage(text):
+        if not parts[0].strip():
+            ocr_text = _extract_pdf_text_ocr(pdf_path)
+            if ocr_text.strip():
+                return ocr_text
         return text
 
     return _extract_pdf_text_ocr(pdf_path)
@@ -120,9 +124,11 @@ def classify_inspection_type(pdf_text: str) -> InspectionTypeResult:
         r"verslag\s+van\s+eerste\s+controle\s*\([^)]*\)\s+van\s+een\s+elektrische\s+hoogspanningsinstallatie",
         r"verslag\s+van\s+eerste\s+controle\s+van\s+een\s+elektrische\s+hoogspanningsinstallatie",
         r"verslag\s+van\s+controlebezoek\s+h\.s\.?\s+installatie",
-        r"controlebezoek\s+van\s+een\s+elektrische\s+installatie\s+op\s+hoogspanning",
+        r"controlebezoek\s+van\s+een\s+elektrische\s+installati?s\s+op\s+hoogspanning",
         r"verslag\s+van\s+controle\s+van\s+elektrische\s+hoogspanningsinstallatie",
         r"proces-verbaal\s+van\s+periodiek\s+controlebezoek\s+van\s+een\s+hoogspanningsinstallatie",
+        r"verslag\s+van\s+gelijkvormigheidsonderzoek\s+van\s+een\s+hoogspanningsinstallatie",
+        r"verslag\s+van\s+periodiek\s+controlebezoek\s+van\s+een\s+hoogspanningsinstallatie",
         r"elektrische\s+installatie\s+op\s+hoogspanning",
     ]
 
@@ -137,6 +143,7 @@ def classify_inspection_type(pdf_text: str) -> InspectionTypeResult:
         r"elektrische\s+installatie\s+L\.S\.",
         r"onderzoeksverslag.*L\.S\.",
         r"Betreft\s*:\s*elektrische\s+installatie\s+L\.S\.",
+        r"verslag\s+van\s+gelijkvormigheidsonderzoek\s+van\s+(?:een\s+)?(?:elektrische\s+)?laagspanningsinstallatie",
     ]
 
     def find_matching_text(patterns: list[str], text: str) -> str | None:
@@ -177,8 +184,15 @@ def classify_attachment_type(pdf_text: str) -> str:
         return "keuring"
 
     lowered = pdf_text.lower()
-    if "bijkomende opnames risicoanalyse distributiecabines" in lowered:
-        return "risicoanalyse"
+    risicoanalyse_patterns = [
+        r"bijkomende opnames risicoanalyse distributiecabines",
+        r"sythesedocument.*bijstand.*risicoanalyse",
+        r"bijstand in het kader van.*risicoanalyse",
+        r"risico\s*[- ]?index",
+    ]
+    for pat in risicoanalyse_patterns:
+        if re.search(pat, lowered, flags=re.DOTALL):
+            return "risicoanalyse"
     return "keuring"
 
 
