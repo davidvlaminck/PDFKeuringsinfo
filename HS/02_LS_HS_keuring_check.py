@@ -116,6 +116,7 @@ def classify_inspection_type(pdf_text: str) -> InspectionTypeResult:
 
     hs_primary_patterns = [
         r"verslag\s+van\s+controle\s+van\s+een\s+(?:elektrische\s+)?hoogspanningsinstallatie",
+        r"verslag\s+van\s+periodieke\s+controle\s+van\s+een\s+(?:elektrische\s+)?hoogspanningsinstallatie",
         r"verslag\s+van\s+eerste\s+controle\s*\([^)]*\)\s+van\s+een\s+elektrische\s+hoogspanningsinstallatie",
         r"verslag\s+van\s+eerste\s+controle\s+van\s+een\s+elektrische\s+hoogspanningsinstallatie",
         r"verslag\s+van\s+controlebezoek\s+h\.s\.?\s+installatie",
@@ -127,6 +128,7 @@ def classify_inspection_type(pdf_text: str) -> InspectionTypeResult:
 
     ls_primary_patterns = [
         r"verslag\s+van\s+controle\s+van\s+een\s+(?:elektrische\s+)?laagspanningsinstallatie",
+        r"verslag\s+van\s+periodieke\s+controle\s+van\s+een\s+(?:elektrische\s+)?laagspanningsinstallatie",
         r"verslag\s+van\s+eerste\s+controle\s*\([^)]*\)\s+van\s+een\s+elektrische\s+laagspanningsinstallatie",
         r"verslag\s+van\s+eerste\s+controle\s+van\s+een\s+elektrische\s+laagspanningsinstallatie",
         r"controlebezoek\s+van\s+een\s+elektrische\s+installatie\s+op\s+laagspanning",
@@ -134,7 +136,6 @@ def classify_inspection_type(pdf_text: str) -> InspectionTypeResult:
         r"elektrische\s+installatie\s+op\s+laagspanning",
         r"elektrische\s+installatie\s+L\.S\.",
         r"onderzoeksverslag.*L\.S\.",
-        r"L\.S\.\s+borden",
         r"Betreft\s*:\s*elektrische\s+installatie\s+L\.S\.",
     ]
 
@@ -169,6 +170,16 @@ def classify_inspection_type(pdf_text: str) -> InspectionTypeResult:
         return InspectionTypeResult(True, hs_text, "LOW")
 
     return InspectionTypeResult(None, "", "LOW")
+
+
+def classify_attachment_type(pdf_text: str) -> str:
+    if not pdf_text:
+        return "keuring"
+
+    lowered = pdf_text.lower()
+    if "bijkomende opnames risicoanalyse distributiecabines" in lowered:
+        return "risicoanalyse"
+    return "keuring"
 
 
 def load_input_rows(input_path: Path) -> list[dict[str, Any]]:
@@ -289,6 +300,7 @@ def check_inspection_types(
             "Gevonden_tekst": classification.found_text,
             "Keuring_type": keuring_type,
             "Vertrouwen": classification.confidence,
+            "Type bijlage": classify_attachment_type(text),
             "Opmerking": "",
         })
 
@@ -337,6 +349,7 @@ def write_output(results: list[dict[str, Any]], output_path: Path) -> None:
         "Gevonden_tekst",
         "Keuring_type",
         "Vertrouwen",
+        "Type bijlage",
         "Opmerking",
     ]
 
@@ -354,6 +367,7 @@ def write_output(results: list[dict[str, Any]], output_path: Path) -> None:
                 record.get("Gevonden_tekst", ""),
                 record.get("Keuring_type", ""),
                 record.get("Vertrouwen", ""),
+                record.get("Type bijlage", ""),
                 record.get("Opmerking", ""),
             ]
         )
