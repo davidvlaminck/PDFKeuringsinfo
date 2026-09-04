@@ -134,9 +134,9 @@ def classify_inspection_type(pdf_text: str) -> InspectionTypeResult:
     combined = re.sub(r"([A-Z]{2,})\s+([A-Z])\b", r"\1\2", combined)
 
     hs_high_conf_patterns = [
-        r"verslag\s+van\s+controlebezoek\s*h\.?\s*s\.?\s*installatie",
+        r"verslag\s+van\s+controlebezoek\s*h\.?\s*(?:l\.?\s*)?s\.?\s*installatie",
         r"verslag\s+van\s+elektrische\s+hoogspanningsinstallatie",
-        r"verslag\s*:?\s*elektrische\s+installaties?\s+op\s+hoogspanning",
+        r"verslag\s*(?:[\(\[]?\d[\)\]]?\s*)?:?\s*elektrische\s+installaties?\s+op\s+hoogspanning",
         r"verslag\s+van\s+controle\s+van\s+(?:een\s+)?(?:elektrische\s+)?hoogspanningsinstallatie",
         r"verslag\s+van\s+periodieke\s+controle\s+van\s+een\s+(?:elektrische\s+)?hoogspanningsinstallatie",
         r"verslag\s+van\s+eerste\s+controle\s*\([^)]*\)\s+van\s+een\s+elektrische\s+hoogspanningsinstallatie",
@@ -174,7 +174,7 @@ def classify_inspection_type(pdf_text: str) -> InspectionTypeResult:
         r"elektrische\s+laagspanningsinstallatie",
         r"elektrische\s+installatie\s+op\s+laagspanning",
         r"elektrische\s+installatie\s+L\.S\.",
-        r"(?=(?:.*voeding\s+afkomstig\s+van\s+vast\s+laagspanningsnet))elektrische\s+neoninstallatie",
+        r"(?=(?:.*voeding\s+afkomstig\s+van\s+vast\s+laagspanningsnet))elektrische\s+neon[\s-]?installatie",
         r"voeding\s+afkomstig\s+van\s+vast\s+laagspanningsnet",
         r"onderzoeksverslag.*L\.S\.",
         r"Betreft\s*:\s*elektrische\s+installatie\s+L\.S\.",
@@ -204,6 +204,10 @@ def classify_inspection_type(pdf_text: str) -> InspectionTypeResult:
     if hs_text and not ls_text:
         return InspectionTypeResult(True, hs_text, "MEDIUM")
     if ls_text and not hs_text:
+        has_neon = re.search(r"elektrische\s+neon[\s-]?installatie", combined, flags=re.IGNORECASE)
+        has_voeding = re.search(r"voeding\s+afkomstig\s+van\s+vast\s+laagspanningsnet", combined, flags=re.IGNORECASE)
+        if has_neon and has_voeding:
+            return InspectionTypeResult(False, ls_text, "HIGH")
         return InspectionTypeResult(False, ls_text, "MEDIUM")
     if hs_text and ls_text:
         return InspectionTypeResult(True, hs_text, "MEDIUM")
