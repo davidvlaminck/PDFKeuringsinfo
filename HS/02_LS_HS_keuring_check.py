@@ -202,6 +202,18 @@ def classify_inspection_type(pdf_text: str) -> InspectionTypeResult:
     ls_text = find_matching_text(ls_medium_conf_patterns, combined)
 
     if hs_text and not ls_text:
+        has_voldoet = re.search(
+            r"installatie\s+voldoet\s+(?:wel\s+|niet\s+)?aan\s+de\s+voorschriften[^\.]{0,30}?boek\s*2",
+            combined,
+            flags=re.IGNORECASE,
+        )
+        has_jaarlijks = re.search(
+            r"de\s+elektrische\s+hoogspanningsinstallatie\s+dient\s+opnieuw\s+gecontroleerd\s+te\s+worden\s+binnen\s+een\s+termijn\s+van\s+1\s+jaar",
+            combined,
+            flags=re.IGNORECASE,
+        )
+        if has_voldoet and has_jaarlijks:
+            return InspectionTypeResult(True, hs_text, "HIGH")
         return InspectionTypeResult(True, hs_text, "MEDIUM")
     if ls_text and not hs_text:
         has_neon = re.search(r"elektrische\s+neon[\s-]?installatie", combined, flags=re.IGNORECASE)
