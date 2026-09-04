@@ -21,8 +21,8 @@ logger = logging.getLogger(__name__)
 
 HS_DIR = Path(__file__).resolve().parent
 DEFAULT_INPUT = HS_DIR / "LS_pdfs_oplijsting.xlsx"
-DEFAULT_PREVIOUS_OUTPUT = HS_DIR / "LS_pdfs_HS_keuring_check_recheck.xlsx"
-DEFAULT_OUTPUT = HS_DIR / "LS_pdfs_HS_keuring_check_recheck2.xlsx"
+DEFAULT_PREVIOUS_OUTPUT = HS_DIR / "LS_pdfs_HS_keuring_check_full.xlsx"
+DEFAULT_OUTPUT = HS_DIR / "LS_pdfs_HS_keuring_check_full_recheck.xlsx"
 DEFAULT_PDF_BASE_DIR = Path("/home/davidlinux/Documenten/AWV/Keuringen")
 
 
@@ -134,7 +134,9 @@ def classify_inspection_type(pdf_text: str) -> InspectionTypeResult:
     combined = re.sub(r"([A-Z]{2,})\s+([A-Z])\b", r"\1\2", combined)
 
     hs_high_conf_patterns = [
-        r"verslag\s+van\s+controlebezoek\s+h\.?\s*s\.?\s+installatie",
+        r"verslag\s+van\s+controlebezoek\s*h\.?\s*s\.?\s*installatie",
+        r"verslag\s+van\s+elektrische\s+hoogspanningsinstallatie",
+        r"verslag\s*:?\s*elektrische\s+installaties?\s+op\s+hoogspanning",
         r"verslag\s+van\s+controle\s+van\s+(?:een\s+)?(?:elektrische\s+)?hoogspanningsinstallatie",
         r"verslag\s+van\s+periodieke\s+controle\s+van\s+een\s+(?:elektrische\s+)?hoogspanningsinstallatie",
         r"verslag\s+van\s+eerste\s+controle\s*\([^)]*\)\s+van\s+een\s+elektrische\s+hoogspanningsinstallatie",
@@ -157,6 +159,7 @@ def classify_inspection_type(pdf_text: str) -> InspectionTypeResult:
         r"verslag\s+van\s+controle\s+van\s+elektrische\s+laagspanningsinstallatie",
         r"verslag\s+van\s+gelijkvormigheidsonderzoek\s+van\s+(?:een\s+)?(?:elektrische\s+)?laagspanningsinstallatie",
         r"verslag\s+\d*\s*van\s+(?:het\s+)?gelijkvormigheidsonderzoek\s+van\s+(?:een\s+)?(?:elektrische\s+)?laagspanningsinstallatie",
+        r"ONDERZOEKSVERSLAG.*?Betreft\s*:?\s*elektrische\s+installatie\s+L\.S\.",
     ]
 
     hs_medium_conf_patterns = [
@@ -482,15 +485,29 @@ def check_ls_hs_keuring(
 
         if pdf_path_col is not None and confidence_col is not None:
             high_confidence_paths = set()
+            type_bijlage_col = None
+            for i, h in enumerate(prev_headers):
+                if str(h).strip() == "Type bijlage":
+                    type_bijlage_col = i
+                    break
+            keuring_paths = set()
             for row in prev_ws.iter_rows(min_row=2, values_only=True):
                 if len(row) > max(pdf_path_col, confidence_col):
                     pdf_path = row[pdf_path_col]
                     confidence = row[confidence_col]
                     if confidence == "HIGH" and pdf_path:
                         high_confidence_paths.add(str(pdf_path).strip())
+                    if type_bijlage_col is not None and len(row) > type_bijlage_col:
+                        if row[type_bijlage_col] == "keuring" and pdf_path:
+                            keuring_paths.add(str(pdf_path).strip())
             prev_wb.close()
             logger.info("Aantal reeds HIGH confidence gemarkeerd: %d", len(high_confidence_paths))
-            rows = [r for r in rows if str(r.get("PDF pad", "")).strip() not in high_confidence_paths]
+            logger.info("Aantal type 'keuring' gemarkeerd: %d", len(keuring_paths))
+            rows = [
+                r for r in rows
+                if str(r.get("PDF pad", "")).strip() not in high_confidence_paths
+                and str(r.get("PDF pad", "")).strip() in keuring_paths
+            ]
             logger.info("Aantal te controleren na filter: %d", len(rows))
 
     results, stats = check_inspection_types(rows, pdf_base_dir, limit=limit, skip=skip)
