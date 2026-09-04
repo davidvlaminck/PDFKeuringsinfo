@@ -134,11 +134,11 @@ def classify_inspection_type(pdf_text: str) -> InspectionTypeResult:
     combined = re.sub(r"([A-Z]{2,})\s+([A-Z])\b", r"\1\2", combined)
 
     hs_high_conf_patterns = [
-        r"verslag\s+van\s+controlebezoek\s*h\.?\s*(?:l\.?\s*)?s\.?\s*installatie",
+        r"verslag\s+van\s+controlebezoek\s*(?:h\.?\s*(?:l\.?\s*)?s\.?\s*|hs[\s-])installatie",
         r"verslag\s+van\s+elektrische\s+hoogspanningsinstallatie",
         r"verslag\s*(?:[\(\[]?\d[\)\]]?\s*)?:?\s*elektrische\s+installaties?\s+op\s+hoogspanning",
-        r"verslag\s+van\s+controle\s+van\s+(?:een\s+)?(?:elektrische\s+)?hoogspanningsinstallatie",
-        r"verslag\s+van\s+periodieke\s+controle\s+van\s+een\s+(?:elektrische\s+)?hoogspanningsinstallatie",
+        r"verslag\s+van\s+controle\s+van\s+(?:van\s+)?(?:een\s+)?(?:elektrische\s+)?hoogspanningsinstallatie",
+        r"verslag\s+van\s+controlebezoek\s+van\s+een\s+(?:elektrische\s+)?hoogspanningsinstallatie",
         r"verslag\s+van\s+eerste\s+controle\s*\([^)]*\)\s+van\s+een\s+elektrische\s+hoogspanningsinstallatie",
         r"verslag\s+van\s+eerste\s+controle\s+van\s+een\s+elektrische\s+hoogspanningsinstallatie",
         r"controlebezoek\s+van\s+een\s+elektrische\s+installaties?\s+op\s+hoogspanning",
