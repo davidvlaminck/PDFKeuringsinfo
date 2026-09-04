@@ -21,8 +21,8 @@ logger = logging.getLogger(__name__)
 
 HS_DIR = Path(__file__).resolve().parent
 DEFAULT_INPUT = HS_DIR / "LS_pdfs_oplijsting.xlsx"
-DEFAULT_PREVIOUS_OUTPUT = HS_DIR / "LS_pdfs_HS_keuring_check.xlsx"
-DEFAULT_OUTPUT = HS_DIR / "LS_pdfs_HS_keuring_check_recheck.xlsx"
+DEFAULT_PREVIOUS_OUTPUT = HS_DIR / "LS_pdfs_HS_keuring_check_recheck.xlsx"
+DEFAULT_OUTPUT = HS_DIR / "LS_pdfs_HS_keuring_check_recheck2.xlsx"
 DEFAULT_PDF_BASE_DIR = Path("/home/davidlinux/Documenten/AWV/Keuringen")
 
 
@@ -111,6 +111,18 @@ def _extract_pdf_text_ocr(pdf_path: Path) -> str:
         return ""
 
 
+def _extract_xlsx_text(xlsx_path: Path) -> str:
+    wb = load_workbook(xlsx_path, read_only=True, data_only=True)
+    parts: list[str] = []
+    for ws in wb.worksheets:
+        for row in ws.iter_rows(values_only=True):
+            for cell_value in row:
+                if cell_value is not None:
+                    parts.append(str(cell_value))
+    wb.close()
+    return "\n".join(parts)
+
+
 def classify_inspection_type(pdf_text: str) -> InspectionTypeResult:
     if not pdf_text or not pdf_text.strip():
         return InspectionTypeResult(None, "", "LOW")
@@ -118,32 +130,52 @@ def classify_inspection_type(pdf_text: str) -> InspectionTypeResult:
     lines = pdf_text.splitlines()
     combined = " ".join(line.strip() for line in lines if line.strip())
 
-    hs_primary_patterns = [
-        r"verslag\s+van\s+controle\s+van\s+een\s+(?:elektrische\s+)?hoogspanningsinstallatie",
+    combined = re.sub(r"verslaag", "verslag", combined, flags=re.IGNORECASE)
+    combined = re.sub(r"([A-Z]{2,})\s+([A-Z])\b", r"\1\2", combined)
+
+    hs_high_conf_patterns = [
+        r"verslag\s+van\s+controlebezoek\s+h\.?\s*s\.?\s+installatie",
+        r"verslag\s+van\s+controle\s+van\s+(?:een\s+)?(?:elektrische\s+)?hoogspanningsinstallatie",
         r"verslag\s+van\s+periodieke\s+controle\s+van\s+een\s+(?:elektrische\s+)?hoogspanningsinstallatie",
         r"verslag\s+van\s+eerste\s+controle\s*\([^)]*\)\s+van\s+een\s+elektrische\s+hoogspanningsinstallatie",
         r"verslag\s+van\s+eerste\s+controle\s+van\s+een\s+elektrische\s+hoogspanningsinstallatie",
-        r"verslag\s+van\s+controlebezoek\s+h\.s\.?\s+installatie",
-        r"controlebezoek\s+van\s+een\s+elektrische\s+installati?s\s+op\s+hoogspanning",
+        r"controlebezoek\s+van\s+een\s+elektrische\s+installaties?\s+op\s+hoogspanning",
         r"verslag\s+van\s+controle\s+van\s+elektrische\s+hoogspanningsinstallatie",
-        r"proces-verbaal\s+van\s+periodiek\s+controlebezoek\s+van\s+een\s+hoogspanningsinstallatie",
-        r"verslag\s+van\s+gelijkvormigheidsonderzoek\s+van\s+een\s+hoogspanningsinstallatie",
-        r"verslag\s+van\s+periodiek\s+controlebezoek\s+van\s+een\s+hoogspanningsinstallatie",
-        r"elektrische\s+installatie\s+op\s+hoogspanning",
+        r"proces-verbaal\s+\d*\s*van\s+periodiek\s+controlebezoek\s+van\s+een\s+hoogspanningsinstallatie",
+        r"verslag\s+van\s+gelijkvormigheidsonderzoek\s+van\s+(?:een\s+)?(?:elektrische\s+)?hoogspanningsinstallatie",
+        r"verslag\s+\d*\s*van\s+(?:het\s+)?gelijkvormigheidsonderzoek\s+van\s+(?:een\s+)?(?:elektrische\s+)?hoogspanningsinstallatie",
+        r"verslag\s+van\s+periodiek\s+controlebezoek\s+van\s+een\s+(?:elektrische\s+)?hoogspanningsinstallatie",
+        r"verslag\s+van\s+controlebezoek\s+hoogspanningsinstallatie",
     ]
 
-    ls_primary_patterns = [
+    ls_high_conf_patterns = [
         r"verslag\s+van\s+controle\s+van\s+een\s+(?:elektrische\s+)?laagspanningsinstallatie",
         r"verslag\s+van\s+periodieke\s+controle\s+van\s+een\s+(?:elektrische\s+)?laagspanningsinstallatie",
         r"verslag\s+van\s+eerste\s+controle\s*\([^)]*\)\s+van\s+een\s+elektrische\s+laagspanningsinstallatie",
         r"verslag\s+van\s+eerste\s+controle\s+van\s+een\s+elektrische\s+laagspanningsinstallatie",
         r"controlebezoek\s+van\s+een\s+elektrische\s+installatie\s+op\s+laagspanning",
         r"verslag\s+van\s+controle\s+van\s+elektrische\s+laagspanningsinstallatie",
+        r"verslag\s+van\s+gelijkvormigheidsonderzoek\s+van\s+(?:een\s+)?(?:elektrische\s+)?laagspanningsinstallatie",
+        r"verslag\s+\d*\s*van\s+(?:het\s+)?gelijkvormigheidsonderzoek\s+van\s+(?:een\s+)?(?:elektrische\s+)?laagspanningsinstallatie",
+    ]
+
+    hs_medium_conf_patterns = [
+        r"elektrische\s+installaties?\s+op\s+hoogspanning",
+        r"elektrische\s+hoogspanningsinstallatie",
+        r"hoogspanningsinstallaties?",
+        r"hs[- ]?cabine",
+    ]
+
+    ls_medium_conf_patterns = [
+        r"elektrische\s+installatie\s+op\s+laagspanning\s+en\s+op\s+zeer\s+lage\s+spanning",
+        r"elektrische\s+laagspanningsinstallatie",
         r"elektrische\s+installatie\s+op\s+laagspanning",
         r"elektrische\s+installatie\s+L\.S\.",
+        r"(?=(?:.*voeding\s+afkomstig\s+van\s+vast\s+laagspanningsnet))elektrische\s+neoninstallatie",
+        r"voeding\s+afkomstig\s+van\s+vast\s+laagspanningsnet",
         r"onderzoeksverslag.*L\.S\.",
         r"Betreft\s*:\s*elektrische\s+installatie\s+L\.S\.",
-        r"verslag\s+van\s+gelijkvormigheidsonderzoek\s+van\s+(?:een\s+)?(?:elektrische\s+)?laagspanningsinstallatie",
+       r"laagspanningsinstallaties?",
     ]
 
     def find_matching_text(patterns: list[str], text: str) -> str | None:
@@ -153,13 +185,23 @@ def classify_inspection_type(pdf_text: str) -> InspectionTypeResult:
                 return m.group(0)
         return None
 
-    hs_text = find_matching_text(hs_primary_patterns, combined)
-    ls_text = find_matching_text(ls_primary_patterns, combined)
+    hs_text = find_matching_text(hs_high_conf_patterns, combined)
+    ls_text = find_matching_text(ls_high_conf_patterns, combined)
 
     if hs_text and not ls_text:
         return InspectionTypeResult(True, hs_text, "HIGH")
     if ls_text and not hs_text:
         return InspectionTypeResult(False, ls_text, "HIGH")
+    if hs_text and ls_text:
+        return InspectionTypeResult(True, hs_text, "MEDIUM")
+
+    hs_text = find_matching_text(hs_medium_conf_patterns, combined)
+    ls_text = find_matching_text(ls_medium_conf_patterns, combined)
+
+    if hs_text and not ls_text:
+        return InspectionTypeResult(True, hs_text, "MEDIUM")
+    if ls_text and not hs_text:
+        return InspectionTypeResult(False, ls_text, "MEDIUM")
     if hs_text and ls_text:
         return InspectionTypeResult(True, hs_text, "MEDIUM")
 
@@ -189,6 +231,7 @@ def classify_attachment_type(pdf_text: str) -> str:
         r"sythesedocument.*bijstand.*risicoanalyse",
         r"bijstand in het kader van.*risicoanalyse",
         r"risico\s*[- ]?index",
+        r"bijlage\s*a\s*deze\s+bijlage\s+maakt\s+deel\s+uit\s+v\d+.*?document\s+met\s+ref",
     ]
     for pat in risicoanalyse_patterns:
         if re.search(pat, lowered, flags=re.DOTALL):
@@ -269,7 +312,11 @@ def check_inspection_types(
             continue
 
         try:
-            text = _extract_pdf_text(pdf_path)
+            file_ext = pdf_path.suffix.lower()
+            if file_ext == ".xlsx":
+                text = _extract_xlsx_text(pdf_path)
+            else:
+                text = _extract_pdf_text(pdf_path)
         except Exception as exc:
             stats["pdf_read_error"] += 1
             stats["unknown"] += 1
@@ -427,23 +474,23 @@ def check_ls_hs_keuring(
             if str(h).strip() == "PDF pad":
                 pdf_path_col = i
                 break
-        hs_keuring_col = None
+        confidence_col = None
         for i, h in enumerate(prev_headers):
-            if str(h).strip() == "HS_Keuring":
-                hs_keuring_col = i
+            if str(h).strip() == "Vertrouwen":
+                confidence_col = i
                 break
 
-        if pdf_path_col is not None and hs_keuring_col is not None:
-            high_voltage_paths = set()
+        if pdf_path_col is not None and confidence_col is not None:
+            high_confidence_paths = set()
             for row in prev_ws.iter_rows(min_row=2, values_only=True):
-                if len(row) > max(pdf_path_col, hs_keuring_col):
+                if len(row) > max(pdf_path_col, confidence_col):
                     pdf_path = row[pdf_path_col]
-                    hs_keuring = row[hs_keuring_col]
-                    if hs_keuring == "TRUE" and pdf_path:
-                        high_voltage_paths.add(str(pdf_path).strip())
+                    confidence = row[confidence_col]
+                    if confidence == "HIGH" and pdf_path:
+                        high_confidence_paths.add(str(pdf_path).strip())
             prev_wb.close()
-            logger.info("Aantal reeds als HIGH gemarkeerd: %d", len(high_voltage_paths))
-            rows = [r for r in rows if str(r.get("PDF pad", "")).strip() not in high_voltage_paths]
+            logger.info("Aantal reeds HIGH confidence gemarkeerd: %d", len(high_confidence_paths))
+            rows = [r for r in rows if str(r.get("PDF pad", "")).strip() not in high_confidence_paths]
             logger.info("Aantal te controleren na filter: %d", len(rows))
 
     results, stats = check_inspection_types(rows, pdf_base_dir, limit=limit, skip=skip)
@@ -516,6 +563,7 @@ def main() -> int:
             input_path=args.input,
             output_path=args.output,
             pdf_base_dir=args.pdf_base_dir,
+            previous_output=args.previous_output,
             limit=args.limit,
             skip=args.skip,
         )
