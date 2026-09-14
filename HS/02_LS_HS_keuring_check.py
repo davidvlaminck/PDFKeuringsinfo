@@ -148,6 +148,10 @@ def classify_inspection_type(pdf_text: str) -> InspectionTypeResult:
         r"verslag\s+\d*\s*van\s+(?:het\s+)?gelijkvormigheidsonderzoek\s+van\s+(?:een\s+)?(?:elektrische\s+)?hoogspanningsinstallatie",
         r"verslag\s+van\s+periodiek\s+controlebezoek\s+van\s+een\s+(?:elektrische\s+)?hoogspanningsinstallatie",
         r"verslag\s+van\s+controlebezoek\s+hoogspanningsinstallatie",
+        r"verslag\s+van\s+eerste\s+controle\s+van\s+een\s+elektrische\s+hoogspanning\s*installatie",
+        r"verslag\s+van\s+herkeuring\s+van\s+een\s+(?:elektrische\s+)?hoogspanningsinstallatie",
+        r"verslag\s+van\s+controlebezoek\s+van\s+een\s+(?:elektrische\s+)?hs[\s-]?installatie",
+        r"verslag\s+van\s+bespreking\s+hoogspanningsinstallaties",
     ]
 
     ls_high_conf_patterns = [
@@ -160,6 +164,9 @@ def classify_inspection_type(pdf_text: str) -> InspectionTypeResult:
         r"verslag\s+van\s+gelijkvormigheidsonderzoek\s+van\s+(?:een\s+)?(?:elektrische\s+)?laagspanningsinstallatie",
         r"verslag\s+\d*\s*van\s+(?:het\s+)?gelijkvormigheidsonderzoek\s+van\s+(?:een\s+)?(?:elektrische\s+)?laagspanningsinstallatie",
         r"ONDERZOEKSVERSLAG.*?Betreft\s*:?\s*elektrische\s+installatie\s+L\.S\.",
+        r"verslag\s+van\s+eerste\s+controle\s+en\s+periodieke\s+controle\s+van\s+een\s+elektrische\s+laagspanning(?:s)?\s*installatie",
+        r"verslag\s+van\s+herkeuring\s+van\s+een\s+elektrische\s+installatie\s+op\s+laagspanning\s+en\s+op\s+zeer\s+lage\s+spanning",
+        r"verslag\s+van\s+herkeuring\s+van\s+een\s+elektrische\s+laagspanningsinstallatie",
     ]
 
     hs_medium_conf_patterns = [
@@ -212,12 +219,24 @@ def classify_inspection_type(pdf_text: str) -> InspectionTypeResult:
             combined,
             flags=re.IGNORECASE,
         )
+        has_kb4dec = re.search(
+            r"inventarisatie\s+van\s+de\s+te\s+nemen\s+beschermingsmaatregelen.*?afdeling\s+iii.*?koninklijk\s+besluit\s+van\s+4\s+december\s+2012",
+            combined,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        has_hs_beschrijving = re.search(
+            r"algemene\s+beschrijving\s+van\s+de\s+hoogspanningsinstallatie",
+            combined,
+            flags=re.IGNORECASE,
+        )
         if has_voldoet and has_jaarlijks:
+            return InspectionTypeResult(True, hs_text, "HIGH")
+        if has_kb4dec and has_hs_beschrijving:
             return InspectionTypeResult(True, hs_text, "HIGH")
         return InspectionTypeResult(True, hs_text, "MEDIUM")
     if ls_text and not hs_text:
         has_neon = re.search(r"elektrische\s+neon[\s-]?installatie", combined, flags=re.IGNORECASE)
-        has_voeding = re.search(r"voeding\s+afkomstig\s+van\s+vast\s+laagspanningsnet", combined, flags=re.IGNORECASE)
+        has_voeding = re.search(r"voeding\s+afkomstig\s+van\s+(?:vast\s+)?laagspanningsnet", combined, flags=re.IGNORECASE)
         if has_neon and has_voeding:
             return InspectionTypeResult(False, ls_text, "HIGH")
         return InspectionTypeResult(False, ls_text, "MEDIUM")
@@ -245,12 +264,23 @@ def classify_attachment_type(pdf_text: str) -> str:
         return "keuring"
 
     lowered = pdf_text.lower()
+
+    foto_patterns = [
+        r"bijlage\s+aan\s+ons\s+verslag.*fotomateriaal",
+        r"(?m)^\s*foto\s+\d+\s*:\s*$",
+    ]
+    for pat in foto_patterns:
+        if re.search(pat, lowered, flags=re.DOTALL):
+            return "foto"
+
     risicoanalyse_patterns = [
         r"bijkomende opnames risicoanalyse distributiecabines",
         r"sythesedocument.*bijstand.*risicoanalyse",
         r"bijstand in het kader van.*risicoanalyse",
         r"risico\s*[- ]?index",
         r"bijlage\s*a\s*deze\s+bijlage\s+maakt\s+deel\s+uit\s+v\d+.*?document\s+met\s+ref",
+        r"verslag\s+van\s+de\s+inventarisatie\s+van\s+de\s+risico.s?\s+en\s+van\s+de\s+assistentie\s+bij\s+risico[\s-]?analyse",
+        r"verslag\s+van\s+risicoinventarisatie",
     ]
     for pat in risicoanalyse_patterns:
         if re.search(pat, lowered, flags=re.DOTALL):
@@ -507,6 +537,7 @@ def check_ls_hs_keuring(
                     type_bijlage_col = i
                     break
             keuring_paths = set()
+            foto_paths = set()
             for row in prev_ws.iter_rows(min_row=2, values_only=True):
                 if len(row) > max(pdf_path_col, confidence_col):
                     pdf_path = row[pdf_path_col]
@@ -514,15 +545,19 @@ def check_ls_hs_keuring(
                     if confidence == "HIGH" and pdf_path:
                         high_confidence_paths.add(str(pdf_path).strip())
                     if type_bijlage_col is not None and len(row) > type_bijlage_col:
-                        if row[type_bijlage_col] == "keuring" and pdf_path:
+                        bijlage = row[type_bijlage_col]
+                        if bijlage == "keuring" and pdf_path:
                             keuring_paths.add(str(pdf_path).strip())
+                        elif bijlage == "foto" and pdf_path:
+                            foto_paths.add(str(pdf_path).strip())
             prev_wb.close()
             logger.info("Aantal reeds HIGH confidence gemarkeerd: %d", len(high_confidence_paths))
             logger.info("Aantal type 'keuring' gemarkeerd: %d", len(keuring_paths))
+            logger.info("Aantal type 'foto' gemarkeerd: %d", len(foto_paths))
             rows = [
                 r for r in rows
                 if str(r.get("PDF pad", "")).strip() not in high_confidence_paths
-                and str(r.get("PDF pad", "")).strip() in keuring_paths
+                and str(r.get("PDF pad", "")).strip() in keuring_paths | foto_paths
             ]
             logger.info("Aantal te controleren na filter: %d", len(rows))
 
