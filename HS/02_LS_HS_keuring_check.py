@@ -21,9 +21,11 @@ logger = logging.getLogger(__name__)
 
 HS_DIR = Path(__file__).resolve().parent
 DEFAULT_INPUT = HS_DIR / "LS_pdfs_oplijsting.xlsx"
-DEFAULT_PREVIOUS_OUTPUT = HS_DIR / "LS_pdfs_HS_keuring_check_full.xlsx"
-DEFAULT_OUTPUT = HS_DIR / "LS_pdfs_HS_keuring_check_full_recheck.xlsx"
+DEFAULT_OUTPUT = HS_DIR / "LS_pdfs_HS_keuring_check_full.xlsx"
 DEFAULT_PDF_BASE_DIR = Path("/home/davidlinux/Documenten/AWV/Keuringen")
+# Standaard NIET een recheck-filter toepassen, zodat het script alle PDF's afloopt.
+# Geef --previous-output expliciet op om enkel nog-niet-HIGH-PDF's te controleren.
+DEFAULT_PREVIOUS_OUTPUT: Path | None = None
 
 
 @dataclass(frozen=True)
