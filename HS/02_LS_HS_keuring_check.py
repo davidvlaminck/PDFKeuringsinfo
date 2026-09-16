@@ -132,9 +132,10 @@ def classify_inspection_type(pdf_text: str) -> InspectionTypeResult:
 
     combined = re.sub(r"verslaag", "verslag", combined, flags=re.IGNORECASE)
     combined = re.sub(r"([A-Z]{2,})\s+([A-Z])\b", r"\1\2", combined)
+    combined = re.sub(r"eleketrische", "elektrische", combined, flags=re.IGNORECASE)
 
     hs_high_conf_patterns = [
-        r"verslag\s+van\s+controlebezoek\s*(?:h\.?\s*(?:l\.?\s*)?s\.?\s*|hs[\s-])installatie",
+        r"verslag\s+van\s+controlebezoek\s*(?:h\.?\s*(?:l\.?\s*)?s\.?\s*[\s-]*|hs[\s-])installatie",
         r"verslag\s+van\s+elektrische\s+hoogspanningsinstallatie",
         r"verslag\s*(?:[\(\[]?\d[\)\]]?\s*)?:?\s*elektrische\s+installaties?\s+op\s+hoogspanning",
         r"verslag\s+van\s+controle\s+van\s+(?:van\s+)?(?:een\s+)?(?:elektrische\s+)?hoogspanningsinstallatie",
@@ -145,10 +146,12 @@ def classify_inspection_type(pdf_text: str) -> InspectionTypeResult:
         r"verslag\s+van\s+controle\s+van\s+elektrische\s+hoogspanningsinstallatie",
         r"proces-verbaal\s+\d*\s*van\s+periodiek\s+controlebezoek\s+van\s+een\s+hoogspanningsinstallatie",
         r"verslag\s+van\s+gelijkvormigheidsonderzoek\s+van\s+(?:een\s+)?(?:elektrische\s+)?hoogspanningsinstallatie",
+        r"verslag\s+van\s+gelijkvormigheidsonderzoek\s+van\s+(?:een\s+)?(?:elektrische\s+)?hoog[\s-]+(?:en\s+)?laagspanningsinstallatie",
         r"verslag\s+\d*\s*van\s+(?:het\s+)?gelijkvormigheidsonderzoek\s+van\s+(?:een\s+)?(?:elektrische\s+)?hoogspanningsinstallatie",
         r"verslag\s+van\s+periodiek\s+controlebezoek\s+van\s+een\s+(?:elektrische\s+)?hoogspanningsinstallatie",
         r"verslag\s+van\s+controlebezoek\s+hoogspanningsinstallatie",
         r"verslag\s+van\s+eerste\s+controle\s+van\s+een\s+elektrische\s+hoogspanning\s*installatie",
+        r"verslag\s+van\s+eerste\s+controle\s+en\s+periodieke\s+controle\s+van\s+een\s+elektrische\s+hoogspanning(?:s)?\s*installatie",
         r"verslag\s+van\s+herkeuring\s+van\s+een\s+(?:elektrische\s+)?hoogspanningsinstallatie",
         r"verslag\s+van\s+controlebezoek\s+van\s+een\s+(?:elektrische\s+)?hs[\s-]?installatie",
         r"verslag\s+van\s+bespreking\s+hoogspanningsinstallaties",
@@ -167,6 +170,9 @@ def classify_inspection_type(pdf_text: str) -> InspectionTypeResult:
         r"verslag\s+van\s+eerste\s+controle\s+en\s+periodieke\s+controle\s+van\s+een\s+elektrische\s+laagspanning(?:s)?\s*installatie",
         r"verslag\s+van\s+herkeuring\s+van\s+een\s+elektrische\s+installatie\s+op\s+laagspanning\s+en\s+op\s+zeer\s+lage\s+spanning",
         r"verslag\s+van\s+herkeuring\s+van\s+een\s+elektrische\s+laagspanningsinstallatie",
+        r"proces-verbaal\s+\d*\s*van\s+gelijkvormigheidsonderzoek\s+[\s-]*en/of\s+controlebezoek\s+van\s+een\s+elektrische\s+laagspanningsinstallatie",
+        r"verslag\s+van\s+inventarisatie\s+van\s+de\s+elektrische\s+risico.s?\s+en\s+assistentie\s+aan\s+de\s+elektrische\s+risico[\s-]?analyse\s+in\s+het\s+kader\s+van\s+het\s+kb\s+04/12/2012\s+van\s+een\s+elektrische\s+laagspanningsinstallatie",
+        r"inventarisatie\s+van\s+de\s+te\s+nemen\s+maatregelen.*?afdeling\s+iii.*?koninklijk\s+besluit\s+van\s+4\s+december\s+2012.*?elektrische\s+laagspanningsinstallatie",
     ]
 
     hs_medium_conf_patterns = [
@@ -181,8 +187,8 @@ def classify_inspection_type(pdf_text: str) -> InspectionTypeResult:
         r"elektrische\s+laagspanningsinstallatie",
         r"elektrische\s+installatie\s+op\s+laagspanning",
         r"elektrische\s+installatie\s+L\.S\.",
-        r"(?=(?:.*voeding\s+afkomstig\s+van\s+vast\s+laagspanningsnet))elektrische\s+neon[\s-]?installatie",
-        r"voeding\s+afkomstig\s+van\s+vast\s+laagspanningsnet",
+        r"(?=(?:.*voeding\s+afkomstig\s+van\s+(?:vast\s+)?laagspanningsnet))elektrische\s+neon[\s-]?installatie",
+        r"voeding\s+afkomstig\s+van\s+(?:vast\s+)?laagspanningsnet",
         r"onderzoeksverslag.*L\.S\.",
         r"Betreft\s*:\s*elektrische\s+installatie\s+L\.S\.",
        r"laagspanningsinstallaties?",
@@ -202,6 +208,25 @@ def classify_inspection_type(pdf_text: str) -> InspectionTypeResult:
         return InspectionTypeResult(True, hs_text, "HIGH")
     if ls_text and not hs_text:
         return InspectionTypeResult(False, ls_text, "HIGH")
+
+    # Co-occurrence upgrade: a document that contains both
+    # "inventarisatie van de te nemen beschermingsmaatregelen ... afdeling III
+    # ... koninklijk besluit van 4 december 2012" and
+    # "algemene beschrijving van de hoogspanningsinstallatie" is a high-confidence
+    # HS inspection, even when a stray "laagspanningsinstallatie" also appears.
+    has_kb4dec = re.search(
+        r"inventarisatie\s+van\s+de\s+te\s+nemen\s+beschermingsmaatregelen.*?afdeling\s+iii.*?koninklijk\s+besluit\s+van\s+4\s+december\s+2012",
+        combined,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    has_hs_beschrijving = re.search(
+        r"algemene\s+beschrijving\s+van\s+de\s+hoogspanningsinstallatie",
+        combined,
+        flags=re.IGNORECASE,
+    )
+    if has_kb4dec and has_hs_beschrijving:
+        return InspectionTypeResult(True, "inventarisatie+algemene beschrijving hoogspanningsinstallatie", "HIGH")
+
     if hs_text and ls_text:
         return InspectionTypeResult(True, hs_text, "MEDIUM")
 
@@ -215,23 +240,11 @@ def classify_inspection_type(pdf_text: str) -> InspectionTypeResult:
             flags=re.IGNORECASE,
         )
         has_jaarlijks = re.search(
-            r"de\s+elektrische\s+hoogspanningsinstallatie\s+dient\s+opnieuw\s+gecontroleerd\s+te\s+worden\s+binnen\s+een\s+termijn\s+van\s+1\s+jaar",
-            combined,
-            flags=re.IGNORECASE,
-        )
-        has_kb4dec = re.search(
-            r"inventarisatie\s+van\s+de\s+te\s+nemen\s+beschermingsmaatregelen.*?afdeling\s+iii.*?koninklijk\s+besluit\s+van\s+4\s+december\s+2012",
-            combined,
-            flags=re.IGNORECASE | re.DOTALL,
-        )
-        has_hs_beschrijving = re.search(
-            r"algemene\s+beschrijving\s+van\s+de\s+hoogspanningsinstallatie",
+            r"de\s+elektrische\s+hoogspanningsinstallatie\s+dient\s+opnieuw\s+gecontroleerd\s+te\s+worden\s+binnen\s+een\s+termijn\s+van[\s_]*1\s+jaar",
             combined,
             flags=re.IGNORECASE,
         )
         if has_voldoet and has_jaarlijks:
-            return InspectionTypeResult(True, hs_text, "HIGH")
-        if has_kb4dec and has_hs_beschrijving:
             return InspectionTypeResult(True, hs_text, "HIGH")
         return InspectionTypeResult(True, hs_text, "MEDIUM")
     if ls_text and not hs_text:
@@ -272,6 +285,28 @@ def classify_attachment_type(pdf_text: str) -> str:
     for pat in foto_patterns:
         if re.search(pat, lowered, flags=re.DOTALL):
             return "foto"
+
+    schema_patterns = [
+        r"\bschema\b",
+        r"\btekening\b",
+        r"\bplanning\b",
+        r"\bcad\b",
+        r"\bas[\s-]?built\b",
+        r"blad\s*nr\.?\s*/\s*aantal\s+bladen",
+        r"installatienummer",
+        r"project\s*nummer",
+        r"dossiernummer",
+        r"bestek\s*nummer",
+        r"opgemmaakt\s+door",
+        r"aannemer",
+        r"nagezien\s+door",
+        r"referentie\s+aannemer",
+        r"datum\s+opmaak",
+        r"sch[\s]?aal",
+    ]
+    schema_hits = sum(1 for pat in schema_patterns if re.search(pat, lowered))
+    if schema_hits >= 3:
+        return "schema"
 
     risicoanalyse_patterns = [
         r"bijkomende opnames risicoanalyse distributiecabines",
@@ -538,6 +573,7 @@ def check_ls_hs_keuring(
                     break
             keuring_paths = set()
             foto_paths = set()
+            schema_paths = set()
             for row in prev_ws.iter_rows(min_row=2, values_only=True):
                 if len(row) > max(pdf_path_col, confidence_col):
                     pdf_path = row[pdf_path_col]
@@ -550,14 +586,17 @@ def check_ls_hs_keuring(
                             keuring_paths.add(str(pdf_path).strip())
                         elif bijlage == "foto" and pdf_path:
                             foto_paths.add(str(pdf_path).strip())
+                        elif bijlage == "schema" and pdf_path:
+                            schema_paths.add(str(pdf_path).strip())
             prev_wb.close()
             logger.info("Aantal reeds HIGH confidence gemarkeerd: %d", len(high_confidence_paths))
             logger.info("Aantal type 'keuring' gemarkeerd: %d", len(keuring_paths))
             logger.info("Aantal type 'foto' gemarkeerd: %d", len(foto_paths))
+            logger.info("Aantal type 'schema' gemarkeerd: %d", len(schema_paths))
             rows = [
                 r for r in rows
                 if str(r.get("PDF pad", "")).strip() not in high_confidence_paths
-                and str(r.get("PDF pad", "")).strip() in keuring_paths | foto_paths
+                and str(r.get("PDF pad", "")).strip() in keuring_paths | foto_paths | schema_paths
             ]
             logger.info("Aantal te controleren na filter: %d", len(rows))
 
