@@ -23,7 +23,7 @@
 | `enrich_vincotte_assets.py` | Step 1: Add Arango UUIDs | ✅ Active |
 | `verify_pdf_contents_result_and_date.py` | Step 2: PDF validation | ✅ Active |
 | `merge_pdf_verification_into_enriched.py` | Step 2b: Merge verification report into enriched | ✅ Active |
-| `merge_infractions_to_enriched.py` | Step 3: Merge infraction counts | 🚧 TODO: Implement |
+| `merge_infractions_to_enriched.py` | Step 3: Merge infraction counts + AREI reference tab | ✅ Active |
 | `AREI Codes_ F-codes...xlsx` | Mapping reference | 📚 Reference |
 | `arango_settings.sample.json` | ArangoDB config | 📚 Template |
 | ~~`extract_red_infractions.py`~~ | Extract from PDFs (OLD) | ⛔ Replaced by MASTER files |

@@ -144,7 +144,8 @@ def _extract_infractions_from_text(pdf_text: str) -> list[InfractionEntry]:
         candidate_sections = [lines]
 
     best_entries: list[InfractionEntry] = []
-    entry_start_re = re.compile(r"^(?P<code>F\d{1,3}|[1-9]\d{3})\b\s*(?P<rest>.*)$", re.IGNORECASE)
+    # Some templates prefix infractions with "I" (inbreuk) or "O" (opmerking), e.g. "I 1522 ...".
+    entry_start_re = re.compile(r"^(?:[IO]\s+)?(?P<code>F\d{1,3}|[1-9]\d{3})\b\s*(?P<rest>.*)$", re.IGNORECASE)
 
     for section in candidate_sections:
         entries: list[InfractionEntry] = []
@@ -175,7 +176,7 @@ def _extract_infractions_from_text(pdf_text: str) -> list[InfractionEntry]:
                 code = m.group("code").upper()
                 rest = _normalize_text(m.group("rest"))
                 # Exclude postal code/city lines like "3000 Leuven" but keep real code+description lines.
-                if re.match(r"^[1-9]\d{3}\s+[A-Za-zÀ-ÿ\- ]{2,40}$", line):
+                if re.match(r"^(?:[IO]\s+)?[1-9]\d{3}\s+[A-Za-zÀ-ÿ\- ]{2,40}$", line):
                     continue
                 flush_current()
                 current_code = code
@@ -221,7 +222,7 @@ def _extract_infractions_from_text(pdf_text: str) -> list[InfractionEntry]:
                 if m:
                     code = m.group("code").upper()
                     rest = _normalize_text(m.group("rest"))
-                    if re.match(r"^[1-9]\d{3}\s+[A-Za-zÀ-ÿ\- ]{2,40}$", line):
+                    if re.match(r"^(?:[IO]\s+)?[1-9]\d{3}\s+[A-Za-zÀ-ÿ\- ]{2,40}$", line):
                         continue
                     flush_current_retry()
                     current_code = code

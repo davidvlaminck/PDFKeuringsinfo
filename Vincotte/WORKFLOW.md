@@ -16,11 +16,17 @@ uv run python Vincotte/verify_pdf_contents_result_and_date.py
 # Step 2b: Merge verification results back into enriched Excel
 uv run python Vincotte/merge_pdf_verification_into_enriched.py
 
-# Step 3: Merge verified infractions (MASTER files) into enriched Excel
+# Step 3: (One-time / on update) Rebuild the combined text-family master mapping
+uv run python Vincotte/build_combined_text_family_mapping.py
+
+# Step 4: Merge verified infractions into enriched Excel (summary pivot)
 uv run python Vincotte/merge_infractions_to_enriched.py
+
+# Step 5: Build the per-asset detail report from the combined master mapping
+uv run python Vincotte/build_final_detaillijst.py
 ```
 
-**Result**: `enriched.xlsx` with all asset info, verification results, and infraction counts.
+**Result**: `detaillijst-latest-keuring.xlsx` with per-asset infraction details and family pivot.
 
 ---
 
@@ -111,81 +117,99 @@ New columns added to enriched output:
 
 ---
 
-### **STEP 3️⃣: Map Infractions to Enriched Excel**
+### **STEP 3️⃣: Build / Refresh Combined Text-Family Master Mapping**
 
-**Purpose**: Load verified infraction mappings (MASTER files) and add family counts to enriched Excel
+**Purpose**: Combine all infraction sources into a single text-first mapping file.
+Run this whenever source files are updated (e.g. after manual review).
+
+**Input** (3 sources, read-only):
+| File | Role |
+|------|------|
+| `final_corrected_with_review.xlsx` | mapped_master — highest priority |
+| `unmapped-ollama-review-template_verwerkt.xlsx` | unmapped_master — second priority |
+| `MyVinotte...all-infractions-with-ollama-suggestions.xlsx` | suggestions — fallback |
+| `MyVinotte...all-infractions-text-review.xlsx` | used to backfill `sample_filename` |
+
+**Family priority within each row** (highest → lowest):
+1. `corrected_family`
+2. `verified_family`
+3. `infraction_family`
+4. `master_combined_families`
+5. `ollama_family_suggestion`
+
+**Source priority** (highest → lowest):
+1. `mapped_master`
+2. `unmapped_master`
+3. `suggestions`
+
+**Output**:
+- `MyVinotte Min.Vl.Gemeenschap Reports list.combined-text-family-mapping.xlsx`
+  - Sheet: `combined_text_mapping`
+  - One row per unique normalised infraction text
+  - Columns: `infraction_text_raw`, `infraction_code_raw`, `sample_filename`, `occurrences`, `family`, `verified`, `text_norm`, `family_source`, `sources_present`, `source_rows`
+
+**Command**:
+```bash
+cd /home/davidlinux/PycharmProjects/PDFKeuringsinfo
+uv run python Vincotte/build_combined_text_family_mapping.py
+```
+
+---
+
+### **STEP 4️⃣: Map Infractions to Enriched Excel (summary pivot)**
+
+**Purpose**: Add family-level infraction counts as pivot columns to the enriched Excel
 
 **Input**:
 - `MyVinotte Min.Vl.Gemeenschap Reports list.enriched.xlsx` (with verification results from Step 2)
-- **MASTER files** (finalized, read-only):
-  - `unmapped-ollama-review-template_verwerkt.xlsx` (formerly unmapped codes, now mapped via Ollama + user review)
-  - `final_corrected_with_review.xlsx` (all mapped infractions, verified)
-
-**These MASTER files are FINAL** — DO NOT edit. They contain all infraction mappings with:
-- infraction_code_raw
-- infraction_text_raw
-- infraction_family (F1-F40 or UNMAPPED)
-- All user reviews and corrections baked in
-
-**Process**:
-
-1. **Load both MASTER files**:
-   - Combine `unmapped-ollama-review-template_verwerkt` + `final_corrected_with_review`
-   - Deduplicate by (asset, code, family) if overlap exists
-   
-2. **Map infractions to PDFs**:
-   - Create mapping: infraction_code_raw → infraction_family
-   - For each PDF in enriched.xlsx, use its filename to find infractions
-   
-3. **Pivot family counts per asset**:
-   - Group by `Arango UUID` (asset identifier)
-   - Count occurrences per family (F1-F40)
-   - Include `infractions_total` and `infractions_UNMAPPED_count`
-   
-4. **Add to enriched.xlsx**:
-   - Join on `Arango UUID`
-   - Add columns: `infractions_F1_count`, `infractions_F2_count`, ..., `infractions_F40_count`, `infractions_UNMAPPED_count`, `infractions_total`
-   - Zero if no infractions for that asset/family
-
-**Output**:
-- Updated `enriched.xlsx` with infraction family pivot columns
-- Side effect: `infractions-mapped-to-assets.csv|xlsx` (detail: asset, filename, code, family, text)
+- **COMBINED MASTER** (single source of truth):
+  - `MyVinotte Min.Vl.Gemeenschap Reports list.combined-text-family-mapping.xlsx`
 
 **Command**:
 ```bash
 cd /home/davidlinux/PycharmProjects/PDFKeuringsinfo
 uv run python Vincotte/merge_infractions_to_enriched.py \
-  --enriched "/home/davidlinux/Documenten/AWV/Keuringen/MyVinotte Min.Vl.Gemeenschap Reports list.enriched.xlsx" \
-  --mapped-master "/home/davidlinux/Documenten/AWV/Keuringen/final_corrected_with_review.xlsx" \
-  --unmapped-master "/home/davidlinux/Documenten/AWV/Keuringen/unmapped-ollama-review-template_verwerkt.xlsx"
+  --enriched "/home/davidlinux/Documenten/AWV/Keuringen/MyVinotte Min.Vl.Gemeenschap Reports list.enriched.xlsx"
 ```
-
-**➡️ TODO (to implement)**: Create `merge_infractions_to_enriched.py` script
-```python
-# Logic:
-# 1. Load two MASTER files
-# 2. Filter verified rows (verified=1) from both
-# 3. Extract: infraction_code_raw, infraction_family, filename
-# 4. Match filename to enriched.xlsx records
-# 5. For each Arango UUID: pivot_table(count by infraction_family)
-# 6. Add columns to enriched.xlsx
-```
-
-This enables rapid analysis: how many assets have infractions in F5 (electrical safety), etc.
 
 ---
 
----
+### **STEP 5️⃣: Build Per-Asset Detail Report**
 
-### **STEP 4️⃣ (Archive): Extract Infractions Script (NO LONGER USED)**
+**Purpose**: Generate the final per-asset infraction detail list for the latest inspection of each asset.
 
-⚠️ **DEPRECATED**: Historical script `extract_red_infractions.py` extracted infractions from PDFs directly.
+**Input**:
+- `MyVinotte...combined-text-family-mapping.xlsx` — single source of truth for text→family
+- `MyVinotte...all-infractions-text-review.xlsx` — all extracted infraction rows
 
-Now we use **MASTER files** instead:
-- `final_corrected_with_review.xlsx` (verified mapped infractions)
-- `unmapped-ollama-review-template_verwerkt.xlsx` (verified unmapped → mapped)
+**Process**:
+1. Load combined mapping (already resolved `family` column — no priority logic needed here)
+2. Load all infractions and normalise text
+3. Join on `text_norm`
+4. Keep only the **most recent inspection** per asset
+5. Aggregate per asset: infraction count, categories, full texts
+6. Pivot per-category counts (one `cat_F##` column per family present)
 
-These are FINAL and immutable. See Step 3 for merging into enriched Excel.
+**Output**:
+- `MyVinotte...detaillijst-latest-keuring.xlsx` with sheets:
+  - `combined_text_mapping` — the mapping used (for auditability)
+  - `latest_asset_summary` — one row per asset, all family pivot columns
+  - `latest_asset_infractions` — one row per infraction in the latest inspection
+  - `summary` — high-level metrics
+- `...detaillijst-latest-keuring.latest_asset_summary.csv`
+
+**Command**:
+```bash
+cd /home/davidlinux/PycharmProjects/PDFKeuringsinfo
+uv run python Vincotte/build_final_detaillijst.py
+```
+
+Optional arguments:
+```
+--combined-mapping  Path to combined-text-family-mapping.xlsx
+--all-infractions   Path to all-infractions-text-review.xlsx
+--output            Output Excel path
+```
 
 ---
 
@@ -195,10 +219,21 @@ These are FINAL and immutable. See Step 3 for merging into enriched Excel.
 |------|---------|
 | `enrich_vincotte_assets.py` | Step 1: Add Arango UUIDs |
 | `verify_pdf_contents_result_and_date.py` | Step 2: Verify PDF verdict + date |
-| `merge_pdf_verification_into_enriched.py` | Step 2b: Merge verification report back into enriched Excel |
-| `merge_infractions_to_enriched.py` | Step 3: Merge MASTER infraction mappings into enriched Excel |
-| `AREI Codes_ F-codes...xlsx` | Mapping reference (F1-F40 ranges) |
+| `merge_pdf_verification_into_enriched.py` | Step 2b: Merge verification back into enriched Excel |
+| `merge_infractions_to_enriched.py` | Step 4: Add family pivot counts to enriched Excel |
+| `build_combined_text_family_mapping.py` | Step 3: Rebuild combined master mapping from all sources |
+| `build_final_detaillijst.py` | Step 5: Build per-asset detail report |
+| `AREI Codes_ F-codes...xlsx` | F-code reference (F1-F40 ranges) |
 | `arango_settings.sample.json` | ArangoDB connection template |
+
+### Key Data Files
+
+| File | Purpose |
+|------|---------|
+| `...combined-text-family-mapping.xlsx` | **MASTER** — single source of truth: text → family |
+| `...all-infractions-text-review.xlsx` | All extracted infraction rows (input to detaillijst) |
+| `...detaillijst-latest-keuring.xlsx` | Final output: per-asset detail report |
+| `...enriched.xlsx` | Asset metadata + verification results |
 
 ---
 
@@ -233,98 +268,63 @@ cp Vincotte/arango_settings.sample.json Vincotte/arango_settings.local.json
 ## 🔄 Data Flow Diagram
 
 ```
-┌─────────────────────────────────────────┐
-│  MyVinotte...xlsx (raw inspection data) │
-│  + Site ID, Label, Visit Date, Filename │
-└──────────────┬──────────────────────────┘
+┌─────────────────────────────────────────────┐
+│  MyVinotte...xlsx (raw inspection data)     │
+│  Site ID, Label, Visit Date, Filename, ...  │
+└──────────────┬──────────────────────────────┘
                │
         Step 1: ENRICH ↓
                │
-┌──────────────▼──────────────────────────┐
-│ enriched.xlsx                           │
-│ + Arango UUID (asset identifier)        │
-│ + Arango Naam, Arango Naampad           │
-└──────────────┬──────────────────────────┘
+┌──────────────▼──────────────────────────────┐
+│ enriched.xlsx                               │
+│ + Arango UUID, Naam, Naampad               │
+└──────────────┬──────────────────────────────┘
                │
      Step 2: VERIFY PDF CONTENTS ↓
-               │                    (TODO: merge back)
-    ┌──────────▼──────────┐
-    │ pdf-contents-check  │─────────────┐
-    │ verdict_match=Y/N   │             │
-    │ date_match=Y/N      │             │
-    └─────────────────────┘             ▼
-               │         ┌──────────────────────┐
-               │         │ enriched.xlsx updated│
-               │         │ + verified_verdict   │
-               │         │ + verdict_match      │
-               │         │ + verified_date      │
-               │         │ + date_match         │
-               │         │ + overall_status     │
-               │         └──────────┬───────────┘
-               │                    │
-         Step 3: MERGE INFRACTIONS (MASTER files) ↓
-               │                    │
-    ┌──────────┴────────────────────┼──────────────────────────┐
-    │                                │                          │
-    │    MASTER FILES (FINAL)        │                          │
-    │    ┌────────────────────────────┐                          │
-    │    │ final_corrected_with_review│                          │
-    │    │ (all mapped infrastructures)                          │
-    │    └────────┬───────────────────┘                          │
-    │             │                                              │
-    │    ┌────────▼─────────────────────────────────┐            │
-    │    │ unmapped-ollama-...._verwerkt            │            │
-    │    │ (formerly unmapped, now mapped + review) │            │
-    │    └────────┬─────────────────────────────────┘            │
-    │             │                                              │
-    │             └──────────────┬──────────────────┬────────────┘
-    │                            │                  │
-    │  1. Load MASTER files      │                  │
-    │  2. Combine (deduplicate)  │                  │
-    │  3. Match filename→         │                  │
-    │     infraction_code→        │                  │
-    │     infraction_family       │                  │
-    │  4. Pivot per asset        │                  │
-    │                            ▼                  ▼
-    └────────────────────────────────────────────────────┐
-                                    │
-                                    ↓
-                    ┌──────────────────────────────┐
-                    │ enriched.xlsx FINAL          │
-                    │ + infractions_F1_count       │
-                    │ + infractions_F2_count       │
-                    │ + ... F40_count              │
-                    │ + infractions_UNMAPPED_count │
-                    │ + infractions_total          │
-                    └──────────────────────────────┘
+               │
+   ┌───────────▼────────────┐
+   │ pdf-contents-check.xlsx │──Step 2b──▶ enriched.xlsx updated
+   │ verdict_match=Y/N       │             + verified_verdict
+   │ date_match=Y/N          │             + verdict_match
+   └─────────────────────────┘             + verified_date
+                                           + date_match
+                                           + overall_status
+
+        Step 4: MERGE INFRACTIONS (summary pivot) ↓
+
+┌────────────────────────────────────────────────────────────────────┐
+│                    COMBINED MASTER MAPPING                         │
+│  combined-text-family-mapping.xlsx  (text_norm → family)          │
+│  Built once by build_combined_text_family_mapping.py (Step 3)     │
+│  Sources: final_corrected_with_review +                            │
+│           unmapped-ollama-review-template_verwerkt +               │
+│           all-infractions-with-ollama-suggestions                  │
+└─────────────────────────────┬──────────────────────────────────────┘
+                              │
+              ┌───────────────┴────────────────────────┐
+              │                                        │
+              ▼                                        ▼
+  Step 4: merge_infractions_to_enriched          Step 5: build_final_detaillijst
+  → enriched.xlsx                                → detaillijst-latest-keuring.xlsx
+    + infractions_F1_count                         + latest_asset_summary
+    + infractions_F2_count                         + latest_asset_infractions
+    + ...                                          + cat_F1, cat_F2, ...
+    + infractions_UNMAPPED_count
+    + infractions_total
 ```
 
 ---
 
 ## 📊 Expected Output Summary
 
-After completing all steps, the **final enriched.xlsx** contains:
+After completing all steps, the **detaillijst-latest-keuring.xlsx** contains:
 
-| Column | Source | Purpose |
-|--------|--------|---------|
-| Site ID, Label, Visit Date, FILENAME, City | Original | Inspection metadata |
-| Arango UUID, Arango Naam, Arango Naampad | Step 1 | Asset identification |
-| verified_verdict, verdict_match | Step 2 | PDF verdict validation |
-| verified_date, date_match, overall_verify_status | Step 2 | PDF date validation |
-| infractions_F1_count ... infractions_F40_count | Step 3 | Infraction family distributions |
-| infractions_UNMAPPED_count, infractions_total | Step 3 | Unmapped + total counts |
+| Sheet | Content |
+|-------|---------|
+| `combined_text_mapping` | The mapping used (text → family, for audit) |
+| `latest_asset_summary` | One row per asset, family pivot columns (`cat_F##`) |
+| `latest_asset_infractions` | One row per infraction in the latest inspection |
+| `summary` | High-level counts (unique texts, assets, infraction rows) |
 
-**This single Excel file** now contains everything needed for compliance analysis:
-- Which assets are verified (verdict + date matches)
-- Which assets have infractions in which families (F1-F40)
-- Ready for pivoting by province, asset type, infraction family, etc.
-
-> All enrichment → verification → infraction merging is **cumulative** — each step's output feeds into the next.
-
-
-
-
-
-
-
-
+> The **combined master mapping** (`combined-text-family-mapping.xlsx`) is the single edit point.
+> After updating it (or its source files), re-run Step 3 then Step 5 to regenerate the report.

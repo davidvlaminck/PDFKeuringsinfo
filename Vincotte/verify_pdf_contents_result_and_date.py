@@ -444,7 +444,7 @@ def _parse_dayfirst_date_token(
 
 def _extract_inspection_date(pdf_text: str, *, visit_date: dt.date | None) -> InspectionDateExtraction:
     """Extract inspection date from PDF document.
-
+    
     Tries multiple patterns:
     1. Interventiegegevens section (date range or single date)
     2. Uitgevoerd op section
@@ -817,14 +817,14 @@ def verify_pdf_contents_and_date(
     limit_rows: int | None = None,
 ) -> dict[str, int]:
     """Verify PDF inspection result (verdict) and date against enriched Excel.
-
+    
     For each row in the input Excel:
     1. Extract decision/verdict from PDF BESLUIT section
     2. Extract inspection date from PDF document
     3. Compare verdict to enriched label
     4. Compare date to enriched visit date
     5. Report mismatches and content duplicates
-
+    
     Returns statistics dictionary.
     """
     df = pd.read_excel(input_excel)
