@@ -47,9 +47,9 @@ except ImportError:
     from PyPDF2 import PdfReader
 
 
-EXCEL_PATH = Path("20260917/20260917_ElektrischeKeuringen_datakwaliteit_verbeteringen.xlsx")
-SHEET_NAME = "nok_eigenschappen_ontbreken"
-BIJLAGEN_DIR = Path("20260917/bijlagen")
+EXCEL_PATH = Path("20261104/ElektrischeKeuring_rapport.xlsx")
+SHEET_NAME = "assets"
+BIJLAGEN_DIR = Path().home() / 'Downloads/Documenten_Keuring'
 
 VERDICT_CONFORM = "conform"
 VERDICT_CONFORM_MET_OPMERKINGEN = "conform-met-opmerkingen"
@@ -332,7 +332,7 @@ def _classify_verdict(text: str, structure: str) -> tuple[str, str, str, bool]:
 
 def _classify_std(lower: str, has_besluit: bool) -> tuple[str, str, str, bool]:
     """VIN_STD: BESLUIT section is authoritative source for verdict."""
-    beslout = _extract_beslout_section_for_class(lower)
+    beslout = _extract_besluit_section_for_class(lower)
     lower_beslout = beslout.lower() if beslout else lower
 
     is_checkbox = _is_checkbox_template(lower_beslout)
@@ -345,7 +345,7 @@ def _classify_std(lower: str, has_besluit: bool) -> tuple[str, str, str, bool]:
             return VERDICT_INBREUKEN, "HIGH", f"Niet-conform: /{pat}/", True
 
     if is_checkbox:
-        pre = _extract_pre_beslout(lower)
+        pre = _extract_pre_besluit(lower)
         if re.search(r"inbreuken.*?nihil|nota.*?nihil|\bnihil\b", pre, re.IGNORECASE | re.DOTALL):
             if _has_remarks(lower_beslout) and not _has_no_remarks(lower_beslout):
                 return VERDICT_CONFORM_MET_OPMERKINGEN, "MEDIUM", "Checkbox: conform + opmerkingen", True
@@ -574,12 +574,12 @@ def _classify_generic(lower: str, has_besluit: bool) -> tuple[str, str, str, boo
     return "", "LOW", "Geen herkenbaar verdict", has_besluit
 
 
-def _extract_beslout_section_for_class(lower: str) -> str:
+def _extract_besluit_section_for_class(lower: str) -> str:
     """Extract BESLUIT section for classification (re-derive from full text)."""
     return _extract_besluit_section(lower)
 
 
-def _extract_pre_beslout(lower: str) -> str:
+def _extract_pre_besluit(lower: str) -> str:
     """Return text before BESLUIT heading."""
     match = re.search(r"(?im)^\s*BESLUIT\s*$", lower)
     if not match:
@@ -891,7 +891,7 @@ def process_excel(excel_path: Path, output_path: Path, bijlagen_dir: Path,
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Extract keuringresultaat + keuringsdatum from PDFs for the 20260917 Excel"
+        description="Extract keuringresultaat + keuringsdatum from PDFs for the Excel"
     )
     parser.add_argument("--excel", type=Path, default=EXCEL_PATH)
     parser.add_argument("--output", type=Path, default=None)
