@@ -47,7 +47,7 @@ except ImportError:
     from PyPDF2 import PdfReader
 
 
-EXCEL_PATH = Path("20261104/ElektrischeKeuring_rapport.xlsx")
+EXCEL_PATH = Path("ElektrischeKeuring_rapport.xlsx")
 SHEET_NAME = "assets"
 BIJLAGEN_DIR = Path().home() / 'Downloads/Documenten_Keuring'
 
@@ -812,13 +812,13 @@ def process_excel(excel_path: Path, output_path: Path, bijlagen_dir: Path,
     for pos in pbar:
         row = df.iloc[pos]
         excel_row = pos + 2
-        filename = row.get("naam", "") or row.get("bijlage.bestandsnaam", "")
+        filename = row.get("bijlage.bestandsnaam", "") or row.get("naam", "")
         site_id = row.get("assetId.identificator", "")
         if not filename or filename == "":
             stats["skipped_no_name"] += 1
             continue
 
-        pdf_path = find_pdf(bijlagen_dir, row.get("naam", ""), row.get("bijlage.bestandsnaam", ""), file_index)
+        pdf_path = find_pdf(bijlagen_dir, row.get("bijlage.bestandsnaam", ""), row.get("naam", ""), file_index)
         if pdf_path is None:
             stats["pdf_not_found"] += 1
             continue
