@@ -15,6 +15,7 @@ dependencies = [
   "msal>=1.31.0",
   "python-arango>=8.1.6",
   "pypdf>=4.2.0",
+  "pypdf2>=3.0.1",
 ]
 
 [project.optional-dependencies]
